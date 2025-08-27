@@ -816,6 +816,7 @@ export interface ApiQuestionQuestion extends Struct.CollectionTypeSchema {
       'api::framework-version.framework-version'
     >;
     guidanceMarkdown: Schema.Attribute.Text & Schema.Attribute.Required;
+    header: Schema.Attribute.String & Schema.Attribute.Required;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<
       'oneToMany',
@@ -831,6 +832,7 @@ export interface ApiQuestionQuestion extends Struct.CollectionTypeSchema {
       'oneToMany',
       'api::question-lock.question-lock'
     >;
+    subheader: Schema.Attribute.String & Schema.Attribute.Required;
     submission_answers: Schema.Attribute.Relation<
       'oneToMany',
       'api::submission-answer.submission-answer'

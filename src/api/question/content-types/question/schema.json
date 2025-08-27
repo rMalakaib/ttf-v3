@@ -58,6 +58,14 @@
     "modelPrompt": {
       "type": "text",
       "required": true
+    },
+    "header": {
+      "type": "string",
+      "required": true
+    },
+    "subheader": {
+      "type": "string",
+      "required": true
     }
   }
 }

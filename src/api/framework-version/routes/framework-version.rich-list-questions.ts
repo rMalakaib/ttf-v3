@@ -1,5 +1,5 @@
 
-// path: src/api/framework-version/routes/framework-version.list-questions.ts
+// path: src/api/framework-version/routes/framework-version.rich-list-questions.ts
 export default {
   routes: [
     {
