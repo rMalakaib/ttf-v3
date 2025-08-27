@@ -1,0 +1,37 @@
+{
+  "kind": "collectionType",
+  "collectionName": "question_locks",
+  "info": {
+    "singularName": "question-lock",
+    "pluralName": "question-locks",
+    "displayName": "questionLock"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "lockExpiresAt": {
+      "type": "time",
+      "required": true
+    },
+    "filing": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::filing.filing",
+      "inversedBy": "question_locks"
+    },
+    "question": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::question.question",
+      "inversedBy": "question_locks"
+    },
+    "users_permissions_user": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "plugin::users-permissions.user",
+      "inversedBy": "question_locks"
+    }
+  }
+}

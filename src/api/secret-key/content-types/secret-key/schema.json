@@ -1,0 +1,36 @@
+{
+  "kind": "collectionType",
+  "collectionName": "secret_keys",
+  "info": {
+    "singularName": "secret-key",
+    "pluralName": "secret-keys",
+    "displayName": "secretKey"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "valueHash": {
+      "type": "string",
+      "required": true
+    },
+    "keyState": {
+      "type": "enumeration",
+      "required": true,
+      "enum": [
+        "active",
+        "revoked"
+      ]
+    },
+    "revokedAt": {
+      "type": "datetime"
+    },
+    "project": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::project.project",
+      "inversedBy": "secret_keys"
+    }
+  }
+}

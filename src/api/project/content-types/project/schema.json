@@ -1,0 +1,54 @@
+{
+  "kind": "collectionType",
+  "collectionName": "projects",
+  "info": {
+    "singularName": "project",
+    "pluralName": "projects",
+    "displayName": "project"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "slug": {
+      "type": "uid",
+      "required": true
+    },
+    "domain": {
+      "type": "string",
+      "required": true,
+      "unique": true
+    },
+    "logo": {
+      "type": "media",
+      "multiple": false,
+      "allowedTypes": [
+        "images"
+      ]
+    },
+    "secret_keys": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::secret-key.secret-key",
+      "mappedBy": "project"
+    },
+    "secret_key": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "api::secret-key.secret-key"
+    },
+    "users_permissions_users": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "plugin::users-permissions.user",
+      "inversedBy": "projects"
+    },
+    "filings": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::filing.filing",
+      "mappedBy": "project"
+    }
+  }
+}

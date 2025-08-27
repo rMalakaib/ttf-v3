@@ -1,0 +1,63 @@
+{
+  "kind": "collectionType",
+  "collectionName": "questions",
+  "info": {
+    "singularName": "question",
+    "pluralName": "questions",
+    "displayName": "question"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "order": {
+      "type": "integer",
+      "required": true
+    },
+    "prompt": {
+      "type": "text",
+      "required": true
+    },
+    "guidanceMarkdown": {
+      "type": "text",
+      "required": true
+    },
+    "maxScore": {
+      "type": "integer",
+      "required": true
+    },
+    "example": {
+      "type": "text",
+      "required": true
+    },
+    "framework_version": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::framework-version.framework-version",
+      "inversedBy": "questions"
+    },
+    "answer_revisions": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::answer-revision.answer-revision",
+      "mappedBy": "question"
+    },
+    "question_locks": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::question-lock.question-lock",
+      "mappedBy": "question"
+    },
+    "submission_answers": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::submission-answer.submission-answer",
+      "mappedBy": "question"
+    },
+    "modelPrompt": {
+      "type": "text",
+      "required": true
+    }
+  }
+}

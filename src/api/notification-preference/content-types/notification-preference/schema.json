@@ -1,0 +1,32 @@
+{
+  "kind": "collectionType",
+  "collectionName": "notification_preferences",
+  "info": {
+    "singularName": "notification-preference",
+    "pluralName": "notification-preferences",
+    "displayName": "notificationPreference"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "emailEnabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "telegramEnabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "lastPingAt": {
+      "type": "datetime"
+    },
+    "users_permissions_user": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "plugin::users-permissions.user",
+      "mappedBy": "notification_preference"
+    }
+  }
+}

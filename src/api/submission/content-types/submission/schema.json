@@ -1,0 +1,46 @@
+{
+  "kind": "collectionType",
+  "collectionName": "submissions",
+  "info": {
+    "singularName": "submission",
+    "pluralName": "submissions",
+    "displayName": "submission"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "number": {
+      "type": "integer",
+      "required": true,
+      "min": 1,
+      "max": 4
+    },
+    "submittedAt": {
+      "type": "datetime",
+      "required": true
+    },
+    "auditorCompleteAt": {
+      "type": "datetime"
+    },
+    "filing": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::filing.filing",
+      "inversedBy": "submissions"
+    },
+    "users_permissions_user": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "plugin::users-permissions.user",
+      "inversedBy": "submissions"
+    },
+    "submission_answers": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::submission-answer.submission-answer",
+      "mappedBy": "submission"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "kind": "collectionType",
+  "collectionName": "client_documents",
+  "info": {
+    "singularName": "client-document",
+    "pluralName": "client-documents",
+    "displayName": "clientDocument"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "document": {
+      "type": "media",
+      "multiple": false,
+      "required": true,
+      "allowedTypes": [
+        "images",
+        "files"
+      ]
+    },
+    "users_permissions_user": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "plugin::users-permissions.user",
+      "inversedBy": "client_documents"
+    },
+    "filing": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::filing.filing",
+      "inversedBy": "client_documents"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "kind": "collectionType",
+  "collectionName": "framework_versions",
+  "info": {
+    "singularName": "framework-version",
+    "pluralName": "framework-versions",
+    "displayName": "frameworkVersion"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "isActive": {
+      "type": "boolean",
+      "default": false
+    },
+    "effectiveDate": {
+      "type": "datetime"
+    },
+    "framework_family": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::framework-family.framework-family",
+      "inversedBy": "framework_versions"
+    },
+    "questions": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::question.question",
+      "mappedBy": "framework_version"
+    },
+    "filings": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::filing.filing",
+      "mappedBy": "framework_version"
+    },
+    "version": {
+      "type": "integer",
+      "required": true
+    }
+  }
+}

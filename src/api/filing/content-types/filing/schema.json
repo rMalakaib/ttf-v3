@@ -1,0 +1,84 @@
+{
+  "kind": "collectionType",
+  "collectionName": "filings",
+  "info": {
+    "singularName": "filing",
+    "pluralName": "filings",
+    "displayName": "filing"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "slug": {
+      "type": "uid",
+      "required": true
+    },
+    "filingStatus": {
+      "type": "enumeration",
+      "required": true,
+      "enum": [
+        "draft",
+        "v1_submitted",
+        "v2_submitted",
+        "v3_submitted",
+        "v4_submitted",
+        "final"
+      ]
+    },
+    "firstSubmitAt": {
+      "type": "datetime"
+    },
+    "finalizedAt": {
+      "type": "datetime"
+    },
+    "submissionScore": {
+      "type": "decimal"
+    },
+    "currentScore": {
+      "type": "decimal",
+      "required": true,
+      "default": 0
+    },
+    "finalScore": {
+      "type": "decimal"
+    },
+    "project": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::project.project",
+      "inversedBy": "filings"
+    },
+    "framework_version": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::framework-version.framework-version",
+      "inversedBy": "filings"
+    },
+    "submissions": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::submission.submission",
+      "mappedBy": "filing"
+    },
+    "answer_revisions": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::answer-revision.answer-revision",
+      "mappedBy": "filing"
+    },
+    "question_locks": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::question-lock.question-lock",
+      "mappedBy": "filing"
+    },
+    "client_documents": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::client-document.client-document",
+      "mappedBy": "filing"
+    }
+  }
+}

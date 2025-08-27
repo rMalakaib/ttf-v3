@@ -1,0 +1,30 @@
+{
+  "kind": "collectionType",
+  "collectionName": "framework_families",
+  "info": {
+    "singularName": "framework-family",
+    "pluralName": "framework-families",
+    "displayName": "frameworkFamily"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "code": {
+      "type": "string",
+      "required": true,
+      "unique": true
+    },
+    "name": {
+      "type": "string",
+      "required": true
+    },
+    "framework_versions": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::framework-version.framework-version",
+      "mappedBy": "framework_family"
+    }
+  }
+}

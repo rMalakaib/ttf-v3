@@ -1,0 +1,33 @@
+{
+  "kind": "collectionType",
+  "collectionName": "submission_answers",
+  "info": {
+    "singularName": "submission-answer",
+    "pluralName": "submission-answers",
+    "displayName": "submissionAnswer"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "submission": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::submission.submission",
+      "inversedBy": "submission_answers"
+    },
+    "question": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::question.question",
+      "inversedBy": "submission_answers"
+    },
+    "answer_revision": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::answer-revision.answer-revision",
+      "inversedBy": "submission_answers"
+    }
+  }
+}
