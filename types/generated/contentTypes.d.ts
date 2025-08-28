@@ -850,12 +850,13 @@ export interface ApiSecretKeySecretKey extends Struct.CollectionTypeSchema {
     singularName: 'secret-key';
   };
   options: {
-    draftAndPublish: true;
+    draftAndPublish: false;
   };
   attributes: {
     createdAt: Schema.Attribute.DateTime;
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
+    expiresAt: Schema.Attribute.DateTime;
     keyState: Schema.Attribute.Enumeration<['active', 'revoked']> &
       Schema.Attribute.Required;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
