@@ -13,8 +13,8 @@
   "attributes": {
     "document": {
       "type": "media",
-      "multiple": false,
-      "required": true,
+      "multiple": true,
+      "required": false,
       "allowedTypes": [
         "images",
         "files"
@@ -28,9 +28,9 @@
     },
     "filing": {
       "type": "relation",
-      "relation": "manyToOne",
+      "relation": "oneToOne",
       "target": "api::filing.filing",
-      "inversedBy": "client_documents"
+      "inversedBy": "client_document"
     }
   }
 }

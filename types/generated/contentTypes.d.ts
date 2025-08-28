@@ -516,9 +516,8 @@ export interface ApiClientDocumentClientDocument
     createdAt: Schema.Attribute.DateTime;
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
-    document: Schema.Attribute.Media<'images' | 'files'> &
-      Schema.Attribute.Required;
-    filing: Schema.Attribute.Relation<'manyToOne', 'api::filing.filing'>;
+    document: Schema.Attribute.Media<'images' | 'files', true>;
+    filing: Schema.Attribute.Relation<'oneToOne', 'api::filing.filing'>;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<
       'oneToMany',
@@ -551,8 +550,8 @@ export interface ApiFilingFiling extends Struct.CollectionTypeSchema {
       'oneToMany',
       'api::answer-revision.answer-revision'
     >;
-    client_documents: Schema.Attribute.Relation<
-      'oneToMany',
+    client_document: Schema.Attribute.Relation<
+      'oneToOne',
       'api::client-document.client-document'
     >;
     createdAt: Schema.Attribute.DateTime;

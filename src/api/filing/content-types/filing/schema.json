@@ -74,9 +74,9 @@
       "target": "api::question-lock.question-lock",
       "mappedBy": "filing"
     },
-    "client_documents": {
+    "client_document": {
       "type": "relation",
-      "relation": "oneToMany",
+      "relation": "oneToOne",
       "target": "api::client-document.client-document",
       "mappedBy": "filing"
     }
