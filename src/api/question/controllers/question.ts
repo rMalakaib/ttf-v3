@@ -179,58 +179,5 @@ export default factories.createCoreController('api::question.question', ({ strap
   const sanitized = await this.sanitizeOutput(entity, ctx);
   return this.transformResponse(sanitized);
 },
-  /**
- * GET /questions/:id/answer-revisions/by-filing-status
- * Returns ONE latest AnswerRevision per requested filing status for a Question (documentId).
- * Query: ?statuses=v1_submitted,final  (optional; defaults to all)
- */
-  async listAnswerRevisionsByFilingStatus(ctx) {
-    const { id: questionDocumentId } = ctx.params;
-    const q = ctx.query as any;
-
-    // Parse & narrow to the enum union
-    const raw = typeof q?.statuses === 'string'
-      ? q.statuses.split(',').map((s: string) => s.trim()).filter(Boolean)
-      : [...FILING_STATUS_ALL];
-
-    // Dedupe + validate + NARROW to FilingStatus[]
-    const wanted: FilingStatus[] = Array.from(new Set(raw)).filter(isFilingStatus);
-    if (wanted.length === 0) {
-      return this.transformResponse({ questionId: questionDocumentId, items: [] });
-    }
-
-    const fields = q?.fields ?? [...ANSWER_REVISION_SCALAR_FIELDS];
-
-    // Pull newest-first revisions for the requested statuses
-    const rows = await strapi
-      .documents('api::answer-revision.answer-revision')
-      .findMany({
-        publicationState: 'preview',
-        filters: {
-          question: { documentId: questionDocumentId },
-          filing: { filingStatus: { $in: wanted } }, // <- FilingStatus[] now, not string[]
-        },
-        fields,
-        populate: { filing: { fields: ['filingStatus'] } },
-        sort: ['updatedAt:desc', 'createdAt:desc'],
-        pagination: { pageSize: 1000 },
-      });
-
-    // Keep newest per status
-    const firstByStatus = new Map<FilingStatus, any>();
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const status = row?.filing?.filingStatus as FilingStatus | undefined;
-      if (!status) continue;
-      if (!firstByStatus.has(status)) {
-        const { filing, ...answerRevision } = row;
-        firstByStatus.set(status, { status, answerRevision });
-      }
-    }
-
-    const items = wanted.map(s => firstByStatus.get(s)).filter(Boolean);
-
-    const sanitized = await this.sanitizeOutput({ questionId: questionDocumentId, items }, ctx);
-    return this.transformResponse(sanitized);
-  },
 
 }));

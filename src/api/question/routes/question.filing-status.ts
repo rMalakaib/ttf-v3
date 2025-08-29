@@ -10,11 +10,5 @@ export default {
       handler: 'question.findLatestDraftAnswerRevision',
       config: { policies: [], middlewares: [] },
     },
-    {
-      method: 'GET',
-      path: '/questions/:id/answer-revisions/by-filing-status',
-      handler: 'question.listAnswerRevisionsByFilingStatus',
-      config: { policies: [], middlewares: [] },
-    },
   ],
 } as const;

@@ -469,9 +469,7 @@ export interface ApiAnswerRevisionAnswerRevision
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
     filing: Schema.Attribute.Relation<'manyToOne', 'api::filing.filing'>;
-    isDraft: Schema.Attribute.Boolean &
-      Schema.Attribute.Required &
-      Schema.Attribute.DefaultTo<true>;
+    isDraft: Schema.Attribute.Boolean & Schema.Attribute.DefaultTo<true>;
     latencyMs: Schema.Attribute.Integer;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<
