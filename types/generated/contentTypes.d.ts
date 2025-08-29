@@ -735,12 +735,7 @@ export interface ApiProjectProject extends Struct.CollectionTypeSchema {
       'api::project.project'
     > &
       Schema.Attribute.Private;
-    logo: Schema.Attribute.Media<'images'>;
     publishedAt: Schema.Attribute.DateTime;
-    secret_key: Schema.Attribute.Relation<
-      'oneToOne',
-      'api::secret-key.secret-key'
-    >;
     secret_keys: Schema.Attribute.Relation<
       'oneToMany',
       'api::secret-key.secret-key'

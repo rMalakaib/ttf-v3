@@ -5,7 +5,6 @@ import crypto from 'node:crypto';
 class NotFoundError extends Error { code = 'NOT_FOUND' as const; }
 class ForbiddenError extends Error { code = 'FORBIDDEN' as const; }
 
-// One source of truth (same env var as cron)
 const TTL_MINUTES = Math.max(1, Number(process.env.SECRET_KEY_TTL_MINUTES ?? 15));
 
 const nowISO = () => new Date().toISOString();
@@ -20,36 +19,31 @@ const generateSecretAndHash = () => {
 
 export default factories.createCoreService('api::secret-key.secret-key', ({ strapi }) => ({
 
-  async ensureProject(projectId: string, withCurrent = false) {
+  // Minimal existence check — no more 'secret_key' populate
+  async ensureProject(projectId: string) {
     return strapi.documents('api::project.project').findOne({
-      documentId: projectId, fields: ['id'], populate: withCurrent ? ['secret_key'] : [],
+      documentId: projectId, fields: ['id'], populate: [],
     });
   },
 
+  // If key is expired and still active, revoke it
   async revokeIfExpired(keyId: string) {
     const key = await strapi.documents('api::secret-key.secret-key').findOne({
-      documentId: keyId, fields: ['id', 'keyState', 'revokedAt', 'expiresAt'], populate: ['project'],
+      documentId: keyId,
+      fields: ['id', 'keyState', 'revokedAt', 'expiresAt'],
+      populate: ['project'],
     });
     if (!key) return;
 
     const exp = (key as any).expiresAt ? new Date((key as any).expiresAt) : null;
     if (!exp || key.keyState === 'revoked' || exp.getTime() > Date.now()) return;
 
-    const updated = await strapi.documents('api::secret-key.secret-key').update({
+    await strapi.documents('api::secret-key.secret-key').update({
       documentId: keyId, data: { keyState: 'revoked', revokedAt: nowISO() },
     });
-
-    const projectId = (key.project as any)?.documentId as string | undefined;
-    if (projectId) {
-      const proj = await this.ensureProject(projectId, true);
-      if (proj?.secret_key && (proj.secret_key as any).documentId === updated.documentId) {
-        await strapi.documents('api::project.project').update({
-          documentId: projectId, data: { secret_key: null },
-        });
-      }
-    }
   },
 
+  // Revoke all expired active keys for this project (idempotent)
   async revokeExpiredForProject(projectId: string) {
     const now = nowISO();
     const expiredActives = await strapi.documents('api::secret-key.secret-key').findMany({
@@ -98,13 +92,6 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
           documentId: keyId, data: { keyState: 'revoked', revokedAt: nowISO() },
         });
 
-    const proj = await this.ensureProject(projectId, true);
-    if (proj?.secret_key && (proj.secret_key as any).documentId === updated.documentId) {
-      await strapi.documents('api::project.project').update({
-        documentId: projectId, data: { secret_key: null },
-      });
-    }
-
     return {
       id: updated.documentId,
       keyState: updated.keyState,
@@ -115,17 +102,26 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
     };
   },
 
+  // Rotate by revoking ANY existing active keys for the project, then creating one fresh active key
   async rotateForProject(projectId: string, valueHash?: string, ttlMinutes?: number) {
-    const project = await this.ensureProject(projectId, true);
+    const project = await this.ensureProject(projectId);
     if (!project) throw new NotFoundError('Project not found');
 
+    // Revoke expired, then revoke all current actives (ensures only one active key exists)
     await this.revokeExpiredForProject(projectId);
-
-    if (project.secret_key) {
-      const currentId = (project.secret_key as any).documentId;
-      await strapi.documents('api::secret-key.secret-key').update({
-        documentId: currentId, data: { keyState: 'revoked', revokedAt: nowISO() },
-      });
+    const actives = await strapi.documents('api::secret-key.secret-key').findMany({
+      filters: { project: { documentId: projectId }, keyState: 'active' },
+      fields: ['id'], populate: [],
+    });
+    if (actives.length) {
+      await Promise.all(
+        actives.map(k =>
+          strapi.documents('api::secret-key.secret-key').update({
+            documentId: k.documentId as string,
+            data: { keyState: 'revoked', revokedAt: nowISO() },
+          }),
+        ),
+      );
     }
 
     let secret: string | undefined;
@@ -139,10 +135,6 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
       data: { valueHash: hash, keyState: 'active', expiresAt: expires, project: projectId },
     });
 
-    await strapi.documents('api::project.project').update({
-      documentId: projectId, data: { secret_key: newKey.documentId },
-    });
-
     const payload: any = {
       id: newKey.documentId,
       keyState: newKey.keyState,
@@ -151,7 +143,7 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
       createdAt: (newKey as any).createdAt,
       updatedAt: (newKey as any).updatedAt,
     };
-    if (secret) payload.secret = secret;
+    if (secret) payload.secret = secret; // only when server generated it
     return payload;
   },
 
