@@ -1,10 +1,442 @@
-// src/api/filing/services/filing.ts
+// path: src/api/filing/services/filing.ts
 import { factories } from '@strapi/strapi';
 import { randomUUID } from 'node:crypto';
 
+import {
+  MAX_ROUNDS,
+  nextStatus,
+  isValidStatus,
+  statusIndex,
+  isAuditorReviewStage,
+  isClientEditStage,
+  submittedIndex,
+  type FilingStatus,
+} from '../utils/status';
+import {
+  allowedActionsFor,
+  type ActorRole,
+  type Action,
+} from '../utils/roles';
+
 const INITIAL_STATUS = 'draft' as const;
 
+/* =================================================================== */
+/* Step 12: Standardized service errors                                 */
+/* =================================================================== */
+export type ServiceErrorCode =
+  | 'INVALID_STATUS'     // unknown/unsupported status, or out of configured rounds
+  | 'FORBIDDEN_ACTION'   // role not allowed to perform this action at this stage
+  | 'NO_NEXT'            // terminal state; no next status
+  | 'BACKWARD'           // attempted backwards or no-op transition
+  | 'SKIP'               // attempted multi-step/skipped transition
+  | 'PREREQ_FAILED'      // missing prerequisites (e.g., empty drafts)
+  | 'LOCK_VIOLATION'     // active lock prevents transition
+  | 'CONFLICT'           // optimistic concurrency/race detected
+  | 'NOT_FOUND';         // entity not found
+
+export class ServiceError extends Error {
+  code: ServiceErrorCode;
+  details?: unknown;
+  constructor(code: ServiceErrorCode, message: string, details?: unknown) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function httpStatusFor(code: ServiceErrorCode): number {
+  switch (code) {
+    case 'FORBIDDEN_ACTION':
+      return 403;
+    case 'CONFLICT':
+    case 'LOCK_VIOLATION':
+      return 409;
+    case 'NOT_FOUND':
+      return 404;
+    default:
+      return 400;
+  }
+}
+
+export function isServiceError(err: unknown): err is ServiceError {
+  return err instanceof ServiceError;
+}
+
+/* =================================================================== */
+/* Step 13: Transition logging helper                                   */
+/* =================================================================== */
+type TransitionLog = {
+  filingDocumentId: string;
+  prevStatus: FilingStatus;
+  newStatus: FilingStatus;
+  actorRole: ActorRole;
+  action: Action;
+  actorUserId?: number | string | null;
+  reason?: string | null;
+  context?: unknown;
+  submissionDocumentId?: string | null;
+};
+
+async function createActivityLog(
+  strapi: any,
+  payload: TransitionLog,
+  trx?: any
+) {
+  // Emit an app event (best-effort)
+  try {
+    strapi.eventHub?.emit?.('filing.status.transition', payload);
+  } catch {
+    /* ignore */
+  }
+
+  // Persist to an Activity-like CT if present; otherwise log to server logs
+  const candidates = ['api::activity-log.activity-log', 'api::activity.activity'];
+  const uid = candidates.find((u) => !!strapi.getModel?.(u));
+
+  if (!uid) {
+    try {
+      strapi.log?.info?.(
+        `[filing.transition] ${payload.filingDocumentId}: ${payload.prevStatus} -> ${payload.newStatus} by ${payload.actorRole} (${payload.action})`
+      );
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  try {
+    await strapi.documents(uid).create({
+      data: {
+        type: 'filing.status.transition',
+        filingDocumentId: payload.filingDocumentId,
+        prevStatus: payload.prevStatus,
+        newStatus: payload.newStatus,
+        actorRole: payload.actorRole,
+        action: payload.action,
+        actorUserId: payload.actorUserId ?? null,
+        reason: payload.reason ?? null,
+        context: payload.context ?? null,
+        submissionDocumentId: payload.submissionDocumentId ?? null,
+        occurredAt: new Date().toISOString(),
+      },
+      status: 'published',
+      // @ts-ignore - supported at runtime
+      transacting: trx as any,
+    } as any);
+  } catch (e) {
+    try {
+      strapi.log?.warn?.(`Activity log failed: ${(e as any)?.message ?? e}`);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/* =================================================================== */
+/* Step 14: Spawn client drafts from prior submitted snapshots          */
+/* =================================================================== */
+
+/**
+ * When moving auditor → client (odd → even), create fresh draft AnswerRevisions by
+ * cloning the last submitted snapshots (revisionIndex = submittedIndex(from)).
+ * - New drafts get revisionIndex = submittedIndex(from) + 1
+ * - Copies client/model fields + auditor guidance
+ * - Skips creation if target drafts already exist (idempotent)
+ */
+async function spawnDraftsForNextClientStage(opts: {
+  strapi: any;
+  trx: any;
+  filingDocumentId: string;
+  from: FilingStatus; // auditor-review stage (v1, v3, …)
+  to: FilingStatus;   // client-edit stage (v2, v4, …)
+}): Promise<{ created: number }> {
+  const { strapi, trx, filingDocumentId, from, to } = opts;
+
+  if (!(isAuditorReviewStage(from) && isClientEditStage(to))) {
+    return { created: 0 };
+  }
+
+  const prevRound = submittedIndex(from as any);      // 1,3,5...
+  const targetRound = prevRound + 1;                  // 2,4,6...
+
+  // If drafts already exist for the target round, don't duplicate
+  const existing = await strapi.documents('api::answer-revision.answer-revision').findMany({
+    filters: {
+      filing: { documentId: filingDocumentId },
+      isDraft: true,
+      revisionIndex: targetRound,
+    },
+    fields: ['id'] as any,
+    populate: [],
+    pagination: { pageSize: 1 },
+    // @ts-ignore
+    transacting: trx as any,
+  } as any);
+
+  if (Array.isArray(existing) && existing.length > 0) {
+    return { created: 0 };
+  }
+
+  // Fetch prior submitted snapshots (non-draft) for prevRound
+  const snapshots = await strapi.documents('api::answer-revision.answer-revision').findMany({
+    filters: {
+      filing: { documentId: filingDocumentId },
+      isDraft: false,
+      revisionIndex: prevRound,
+    },
+    fields: [
+      'revisionIndex',
+      'answerText',
+      'modelPromptRaw',
+      'modelResponseRaw',
+      'modelScore',
+      'modelReason',
+      'modelSuggestion',
+      'latencyMs',
+      'auditorScore',
+      'auditorReason',
+      'auditorSuggestion',
+    ] as any,
+    populate: {
+      question: { fields: ['id'] as any }, // documentId will still be present
+    } as any,
+    pagination: { pageSize: 1000 }, // reasonable cap
+    // @ts-ignore
+    transacting: trx as any,
+  } as any);
+
+  let created = 0;
+
+  for (const snap of Array.isArray(snapshots) ? snapshots : []) {
+    const qDocId = snap?.question?.documentId;
+    if (!qDocId) continue; // cannot spawn without a question
+
+    await strapi.documents('api::answer-revision.answer-revision').create({
+      data: {
+        revisionIndex: targetRound,
+        isDraft: true,
+        // carry forward client/model content
+        answerText: snap.answerText ?? '',
+        modelPromptRaw: snap.modelPromptRaw ?? null,
+        modelResponseRaw: snap.modelResponseRaw ?? null,
+        modelScore: snap.modelScore ?? null,
+        modelReason: snap.modelReason ?? null,
+        modelSuggestion: snap.modelSuggestion ?? null,
+        latencyMs: snap.latencyMs ?? null,
+        // carry forward auditor guidance as read-only context
+        auditorScore: snap.auditorScore ?? null,
+        auditorReason: snap.auditorReason ?? null,
+        auditorSuggestion: snap.auditorSuggestion ?? null,
+        // relations
+        filing: { documentId: filingDocumentId },
+        question: { documentId: qDocId },
+        // intentionally omit users_permissions_user; set it elsewhere if needed
+      },
+      status: 'published', // keep drafts visible to API; 'isDraft' governs workflow
+      // @ts-ignore
+      transacting: trx as any,
+    } as any);
+
+    created += 1;
+  }
+
+  return { created };
+}
+
+/* =================================================================== */
+/* Service                                                              */
+/* =================================================================== */
 export default factories.createCoreService('api::filing.filing', ({ strapi }) => ({
+
+  /* ---------------------------------------------------------------
+   * Step 5: Central transition guard (throws ServiceError)
+   * --------------------------------------------------------------- */
+  computeNext(opts: {
+    current: string;
+    actorRole: ActorRole;
+    action: Action;
+  }): { next: FilingStatus } {
+    const { current, actorRole, action } = opts;
+
+    if (!isValidStatus(current, MAX_ROUNDS)) {
+      throw new ServiceError('INVALID_STATUS', `Unknown filing status: ${current}`);
+    }
+    const curr = current as FilingStatus;
+
+    const allowed = allowedActionsFor(curr, actorRole, MAX_ROUNDS);
+    if (!allowed.includes(action)) {
+      throw new ServiceError(
+        'FORBIDDEN_ACTION',
+        `Role '${actorRole}' cannot '${action}' from '${curr}'`
+      );
+    }
+
+    const candidate: FilingStatus | null =
+      action === 'finalize' ? 'final' : nextStatus(curr, MAX_ROUNDS);
+
+    if (!candidate) {
+      throw new ServiceError('NO_NEXT', `No next status from '${curr}'`);
+    }
+
+    // Enforce "no skips / no reversals"
+    const prevIdx = statusIndex(curr, MAX_ROUNDS);
+    const nextIdx = statusIndex(candidate, MAX_ROUNDS);
+    if (nextIdx <= prevIdx) {
+      throw new ServiceError('BACKWARD', `Cannot move backward or stay in place (${curr} → ${candidate})`);
+    }
+    if (nextIdx !== prevIdx + 1) {
+      throw new ServiceError('SKIP', `Cannot skip intermediate stage (${curr} → ${candidate})`);
+    }
+
+    return { next: candidate };
+  },
+
+  /* ---------------------------------------------------------------
+   * Step 6 (+13 +14): Atomic transition + logging + draft spawn
+   * --------------------------------------------------------------- */
+  async transitionAtomic(opts: {
+    filingDocumentId: string;
+    actorRole: ActorRole;             // 'client' | 'auditor' | 'admin'
+    action: Action;                   // 'submit' | 'advance' | 'finalize'
+    actorUserId?: number | string;    // optional, for logging
+    reason?: string;                  // optional, for logging
+    context?: unknown;                // optional, for logging
+  }) {
+    const { filingDocumentId, actorRole, action, actorUserId, reason, context } = opts;
+
+    return await strapi.db.transaction(async (trx: any) => {
+      // 1) Read current state inside the transaction
+      const pre = await strapi.documents('api::filing.filing').findOne({
+        documentId: filingDocumentId,
+        fields: [
+          'id',
+          'documentId',
+          'filingStatus',
+          'updatedAt',
+          'firstSubmitAt',
+          'finalizedAt',
+        ] as any,
+        populate: [],
+        // @ts-ignore - supported at runtime
+        transacting: trx as any,
+      } as any);
+
+      if (!pre) throw new ServiceError('NOT_FOUND', 'Filing not found');
+
+      const from = pre.filingStatus as FilingStatus;
+
+      // 2) Decide the next status via the guard
+      const { next } = this.computeNext({ current: from, actorRole, action });
+
+      // 3) Prerequisites (locks/completeness/etc.)
+      await this.assertTransitionPrereqs?.({ trx, filing: pre, from, to: next, action });
+
+      // 4) Side-effects
+      // 4a) Stage-aware draft spawning: only on auditor → client (odd → even)
+      let spawned = { created: 0 };
+      if (isAuditorReviewStage(from) && isClientEditStage(next)) {
+        spawned = await spawnDraftsForNextClientStage({
+          strapi,
+          trx,
+          filingDocumentId,
+          from,
+          to: next,
+        });
+      }
+
+      // 4b) Custom hook (e.g., snapshot Submission)
+      const sideEffectsResult = await this.runTransitionSideEffects?.({
+        trx,
+        filing: pre,
+        from,
+        to: next,
+        action,
+      });
+
+      // Safely narrow (void | { submissionDocumentId?: string })
+      const submissionDocumentId: string | null =
+        sideEffectsResult && typeof sideEffectsResult === 'object' && 'submissionDocumentId' in sideEffectsResult
+          ? (sideEffectsResult as { submissionDocumentId?: string }).submissionDocumentId ?? null
+          : null;
+
+      // 5) Verify unchanged (optimistic concurrency)
+      const check = await strapi.documents('api::filing.filing').findOne({
+        documentId: filingDocumentId,
+        fields: ['filingStatus', 'updatedAt'] as any,
+        populate: [],
+        // @ts-ignore - supported at runtime
+        transacting: trx as any,
+      } as any);
+
+      if (!check) throw new ServiceError('NOT_FOUND', 'Filing not found');
+      if (check.filingStatus !== pre.filingStatus || check.updatedAt !== pre.updatedAt) {
+        throw new ServiceError('CONFLICT', 'Filing changed during transition');
+      }
+
+      // 6) Apply update (stamp edge fields exactly once)
+      const stamps: Record<string, any> = {};
+      if (from === 'draft' && next === 'v1_submitted' && !pre.firstSubmitAt) {
+        stamps.firstSubmitAt = new Date().toISOString();
+      }
+      if (next === 'final' && !pre.finalizedAt) {
+        stamps.finalizedAt = new Date().toISOString();
+      }
+
+      const updated = await strapi.documents('api::filing.filing').update({
+        documentId: filingDocumentId,
+        data: { filingStatus: next, ...stamps },
+        status: 'published',
+        // @ts-ignore - supported at runtime
+        transacting: trx as any,
+      } as any);
+
+      // 7) Activity log (best-effort)
+      await createActivityLog(
+        strapi,
+        {
+          filingDocumentId,
+          prevStatus: from,
+          newStatus: next,
+          actorRole,
+          action,
+          actorUserId: actorUserId ?? null,
+          reason: reason ?? null,
+          context: { ...(context as any), spawnedDrafts: spawned.created ?? 0 },
+          submissionDocumentId,
+        },
+        trx
+      );
+
+      return updated;
+    });
+  },
+
+  /** Optional prerequisite hook — throw ServiceError('PREREQ_FAILED' | 'LOCK_VIOLATION', msg) as needed */
+  async assertTransitionPrereqs(_opts: {
+    trx: any;
+    filing: any;
+    from: FilingStatus;
+    to: FilingStatus;
+    action: Action;
+  }) {
+    // no-op for now
+  },
+
+  /** Optional side-effects hook — may also throw PREREQ_FAILED if snapshotting detects issues */
+  async runTransitionSideEffects(_opts: {
+    trx: any;
+    filing: any;
+    from: FilingStatus;
+    to: FilingStatus;
+    action: Action;
+  }): Promise<{ submissionDocumentId?: string } | void> {
+    // no-op for now
+    return;
+  },
+
+  /* ---------------------------------------------------------------
+   * Existing helpers
+   * --------------------------------------------------------------- */
   async listByProject(opts: {
     projectDocumentId: string;
     filters?: any;
@@ -29,7 +461,9 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
     familyCode?: string;
   }) {
     const { projectDocumentId, familyDocumentId, familyCode } = opts;
-    if (!familyDocumentId && !familyCode) throw new Error('Provide either familyDocumentId or familyCode');
+    if (!familyDocumentId && !familyCode) {
+      throw new ServiceError('PREREQ_FAILED', 'Provide either familyDocumentId or familyCode');
+    }
 
     // 1) Latest active version in family (by docId or code)
     const familyRelationFilter = familyDocumentId
@@ -38,14 +472,14 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
 
     const versions = await strapi.documents('api::framework-version.framework-version').findMany({
       filters: { isActive: true, ...familyRelationFilter },
-      fields: ['id', 'version', 'isActive'] as const,
+      fields: ['id', 'version', 'isActive'] as any,
       populate: [],
       sort: ['version:desc'],
       pagination: { pageSize: 1 },
     });
 
     const version = Array.isArray(versions) && versions.length ? versions[0] : null;
-    if (!version) throw new Error('No active FrameworkVersion found for the provided family');
+    if (!version) throw new ServiceError('PREREQ_FAILED', 'No active FrameworkVersion found for the provided family');
 
     // 2) Create Filing as published
     const filing = await strapi.documents('api::filing.filing').create({
@@ -59,20 +493,19 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
       status: 'published',
     });
 
-    // 3) Fetch FIRST question (order asc, pageSize 1) and alias maxScore → score
-
+    // 3) First question (lean)
     const first = await strapi.documents('api::question.question').findMany({
       filters: { framework_version: { documentId: version.documentId } },
       fields: [
-            'id',
-            'order',
-            'header',
-            'subheader',
-            'prompt',
-            'example',
-            'guidanceMarkdown',
-            'maxScore',
-        ] as any,
+        'id',
+        'order',
+        'header',
+        'subheader',
+        'prompt',
+        'example',
+        'guidanceMarkdown',
+        'maxScore',
+      ] as any,
       sort: ['order:asc'],
       populate: [],
       pagination: { pageSize: 1 },

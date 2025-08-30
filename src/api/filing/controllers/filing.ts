@@ -1,4 +1,4 @@
-// src/api/filing/controllers/filing.ts
+// path: src/api/filing/controllers/filing.ts
 import { factories } from '@strapi/strapi';
 
 export default factories.createCoreController('api::filing.filing', ({ strapi }) => ({
@@ -41,6 +41,63 @@ export default factories.createCoreController('api::filing.filing', ({ strapi })
       return this.transformResponse({ filing, firstQuestion });
     } catch (err: any) {
       return ctx.badRequest(typeof err?.message === 'string' ? err.message : 'Failed to create filing');
+    }
+  },
+
+  /** POST /filings/:id/submit  (client → next auditor stage) */
+  async submit(ctx) {
+    const { id: filingDocumentId } = ctx.params;
+    try {
+      const updated = await strapi.service('api::filing.filing').transitionAtomic({
+        filingDocumentId,
+        actorRole: 'client',  // policies should ensure this route is client-only
+        action: 'submit',
+      });
+      const sanitized = await this.sanitizeOutput(updated, ctx);
+      return this.transformResponse(sanitized);
+    } catch (err: any) {
+      if (err?.code === 'CONFLICT') return ctx.conflict(err.message);
+      if (err?.code === 'FORBIDDEN_ACTION') return ctx.forbidden(err.message);
+      if (err?.code === 'NOT_FOUND') return ctx.notFound(err.message);
+      return ctx.badRequest(err?.message ?? 'Submit failed');
+    }
+  },
+
+  /** POST /filings/:id/advance (auditor → next client stage) */
+  async advance(ctx) {
+    const { id: filingDocumentId } = ctx.params;
+    try {
+      const updated = await strapi.service('api::filing.filing').transitionAtomic({
+        filingDocumentId,
+        actorRole: 'auditor', // policies should ensure this route is auditor-only
+        action: 'advance',
+      });
+      const sanitized = await this.sanitizeOutput(updated, ctx);
+      return this.transformResponse(sanitized);
+    } catch (err: any) {
+      if (err?.code === 'CONFLICT') return ctx.conflict(err.message);
+      if (err?.code === 'FORBIDDEN_ACTION') return ctx.forbidden(err.message);
+      if (err?.code === 'NOT_FOUND') return ctx.notFound(err.message);
+      return ctx.badRequest(err?.message ?? 'Advance failed');
+    }
+  },
+
+  /** POST /filings/:id/finalize (auditor → final) */
+  async finalize(ctx) {
+    const { id: filingDocumentId } = ctx.params;
+    try {
+      const updated = await strapi.service('api::filing.filing').transitionAtomic({
+        filingDocumentId,
+        actorRole: 'auditor', // policies should ensure this route is auditor-only
+        action: 'finalize',
+      });
+      const sanitized = await this.sanitizeOutput(updated, ctx);
+      return this.transformResponse(sanitized);
+    } catch (err: any) {
+      if (err?.code === 'CONFLICT') return ctx.conflict(err.message);
+      if (err?.code === 'FORBIDDEN_ACTION') return ctx.forbidden(err.message);
+      if (err?.code === 'NOT_FOUND') return ctx.notFound(err.message);
+      return ctx.badRequest(err?.message ?? 'Finalize failed');
     }
   },
 }));
