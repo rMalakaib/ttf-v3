@@ -67,8 +67,8 @@ export default async (policyContext: any, _config: unknown, { strapi }: { strapi
     const isClientStage = status === 'draft' || (status && isClientEditStage(status));
     if (!isClientStage) {
       await log(strapi, { allow:false, entityId:'new', userId, payload,
-        meta:{ step:5, reason:'Create allowed only during client stages', role, method, status }});
-      return { status:403, message:'Create allowed only during client stages' };
+        meta:{ step:5, reason:'Create allowed only during client stages/or trying to create two drafts', role, method, status }});
+      return { status:403, message:'Create allowed only during client stages/or trying to create two drafts' };
     }
 
     // only clients/admin can create
@@ -105,6 +105,51 @@ export default async (policyContext: any, _config: unknown, { strapi }: { strapi
 
   // ---------- UPDATE / DELETE
   const documentId = policyContext.params?.id ?? 'unknown';
+
+  // ✅ Custom draft route support: /filings/:filingId/questions/:questionId/draft
+  const filingDocId   = policyContext.params?.filingId;
+  const questionDocId = policyContext.params?.questionId;
+
+  if (documentId === 'unknown' && filingDocId && questionDocId && (method === 'PUT' || method === 'PATCH')) {
+    const filing = await strapi.documents('api::filing.filing').findOne({
+      documentId: filingDocId,
+      fields: ['filingStatus'] as any,
+      populate: [],
+    } as any);
+    const status = filing?.filingStatus as FilingStatus | undefined;
+
+    const isClientStage = status === 'draft' || (status && isClientEditStage(status));
+    const fieldsChangedDraft = Object.keys(payload || {}).filter((k) => !IGNORED_FIELDS.has(k));
+
+    if (!isClientStage) {
+      await log(strapi, { allow:false, entityId:'unknown', userId, payload,
+        meta:{ step:5, reason:'Create/update allowed only during client stages', role, method, status, fieldsChanged: fieldsChangedDraft }});
+      return { status:403, message:'Create/update allowed only during client stages' };
+    }
+
+    if (!(role === 'Authenticated' || role === 'admin')) {
+      await log(strapi, { allow:false, entityId:'unknown', userId, payload,
+        meta:{ step:5, reason:'Only clients may update drafts', role, method, status, fieldsChanged: fieldsChangedDraft }});
+      return { status:403, message:'Only clients may update drafts' };
+    }
+
+    // ✅ allow ONLY answerText on drafts
+    if (!('answerText' in (payload || {})) || typeof payload.answerText !== 'string') {
+      await log(strapi, { allow:false, entityId:'unknown', userId, payload,
+        meta:{ step:5, reason:'answerText (string) is required', role, method, status, fieldsChanged: fieldsChangedDraft }});
+      return { status:400, message:'answerText (string) is required' };
+    }
+    if (fieldsChangedDraft.some((f) => f !== 'answerText')) {
+      await log(strapi, { allow:false, entityId:'unknown', userId, payload,
+        meta:{ step:5, reason:`Only answerText may be edited on drafts: ${fieldsChangedDraft.join(', ')}`, role, method, status, fieldsChanged: fieldsChangedDraft }});
+      return { status:403, message:`Only answerText may be edited on drafts: ${fieldsChangedDraft.join(', ')}` };
+    }
+
+    await log(strapi, { allow:true, entityId:'unknown', userId, payload,
+      meta:{ step:5, role, method, status, isDraft:true, fieldsChanged: fieldsChangedDraft }});
+    return true;
+  }
+
   let status: FilingStatus | undefined;
   let isDraft: boolean | undefined;
 

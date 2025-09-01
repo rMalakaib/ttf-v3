@@ -1,4 +1,3 @@
-// path: src/api/answer-revision/routes/answer-revision.ts
 import { factories } from '@strapi/strapi';
 
 export default factories.createCoreRouter('api::answer-revision.answer-revision', {
@@ -6,8 +5,28 @@ export default factories.createCoreRouter('api::answer-revision.answer-revision'
   config: {
     find:    { policies: [], middlewares: [] },
     findOne: { policies: [], middlewares: [] },
-    create:  { policies: ['api::answer-revision.enforce-stage-editability'], middlewares: [] },
-    update:  { policies: ['api::answer-revision.enforce-stage-editability'], middlewares: [] },
-    delete:  { policies: ['api::answer-revision.enforce-stage-editability'], middlewares: [] }, // optional
+
+    // Writes: must be a project member (or auditor/admin) AND pass stage-editability
+    create:  {
+      policies: [
+        { name: 'global::enforce-project-membership', config: { target: 'answer-revision' } },
+        'api::answer-revision.enforce-stage-editability',
+      ],
+      middlewares: [],
+    },
+    update:  {
+      policies: [
+        { name: 'global::enforce-project-membership', config: { target: 'answer-revision' } },
+        'api::answer-revision.enforce-stage-editability',
+      ],
+      middlewares: [],
+    },
+    delete:  {
+      policies: [
+        { name: 'global::enforce-project-membership', config: { target: 'answer-revision' } },
+        'api::answer-revision.enforce-stage-editability',
+      ],
+      middlewares: [],
+    },
   },
 });
