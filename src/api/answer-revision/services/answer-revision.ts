@@ -147,6 +147,28 @@ export default factories.createCoreService('api::answer-revision.answer-revision
   }) {
     // 1) Coherence + resolve draft
     const { filing, question } = await this.assertCoherence(filingDocumentId, questionDocumentId);
+    
+    // 🔒 1b) ACQUIRE ACTIVE LOCK if it doesn't exist
+    const lockTtlSeconds = Math.max(1, Number(process.env.QUESTION_LOCK_TTL_SECONDS ?? 12));
+    try {
+      await strapi.service('api::question-lock.question-lock').acquire({
+          filingDocumentId,
+          questionDocumentId,
+          userId: userId!,          // route policy guarantees auth
+        ttlSeconds: lockTtlSeconds,
+        });
+      } catch (e: any) {
+        // Ignore conflicts; if someone else holds it, the next check will 409.
+        if (!e?.status || e.status !== 409) throw e;
+      }
+
+    // 🔒 1b) REQUIRE ACTIVE LOCK (and refresh TTL so the save has time to complete)
+    await strapi.service('api::question-lock.question-lock').ensureLockHeld({
+      filingDocumentId,
+      questionDocumentId,
+      userId: userId!,
+      ttlSecondsOnSuccess: lockTtlSeconds, // refresh on entry to cover the whole save
+    });
 
     let draft = await this.findDraft(filingDocumentId, questionDocumentId);
     if (!draft) {

@@ -771,7 +771,7 @@ export interface ApiQuestionLockQuestionLock
       'api::question-lock.question-lock'
     > &
       Schema.Attribute.Private;
-    lockExpiresAt: Schema.Attribute.Time & Schema.Attribute.Required;
+    lockExpiresAt: Schema.Attribute.DateTime & Schema.Attribute.Required;
     publishedAt: Schema.Attribute.DateTime;
     question: Schema.Attribute.Relation<'manyToOne', 'api::question.question'>;
     updatedAt: Schema.Attribute.DateTime;
