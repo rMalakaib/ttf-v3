@@ -113,3 +113,98 @@ export async function recomputeFilingCurrentScore(
 
   return rounded;
 }
+
+/* ========================= Submissions: helpers & recompute ========================= */
+
+/** Prefer auditorScore for snapshots (isDraft:false); else modelScore; else 0. */
+export function effectiveSnapshotScore(row: any): number {
+  const as = row?.auditorScore;
+  const ms = row?.modelScore;
+  const v = as != null ? Number(as) : (ms != null ? Number(ms) : 0);
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Load snapshot AnswerRevisions (isDraft:false) via SubmissionAnswer links. */
+export async function collectSubmissionSnapshots(
+  strapi: any,
+  submissionDocumentId: string
+): Promise<any[]> {
+  const links = await strapi.documents('api::submission-answer.submission-answer').findMany({
+    publicationState: 'preview',
+    filters: { submission: { documentId: submissionDocumentId } },
+    fields: ['documentId'] as any,
+    populate: {
+      answer_revision: {
+        fields: ['documentId', 'isDraft', 'modelScore', 'auditorScore', 'updatedAt'] as any,
+      } as any,
+    } as any,
+    pagination: { pageSize: 5000 },
+  } as any);
+
+  const out: any[] = [];
+  for (const l of links as any[]) {
+    const rev = l?.answer_revision;
+    if (rev?.isDraft === false) out.push(rev);
+  }
+  return out;
+}
+
+/**
+ * Recompute and persist Submission.score from its snapshots.
+ *  - per-question: auditorScore ?? modelScore ?? 0
+ *  - sum, then round to nearest 0.5
+ *  - append ActivityLog when score actually changes
+ */
+export async function recomputeSubmissionScore(
+  strapi: any,
+  submissionDocumentId: string,
+  opts?: { log?: boolean; userId?: number | null }
+): Promise<number> {
+  const log = opts?.log ?? LOG_ON;
+
+  const snaps = await collectSubmissionSnapshots(strapi, submissionDocumentId);
+
+  let total = 0;
+  for (const s of snaps) total += effectiveSnapshotScore(s);
+  const rounded = quantizeToHalf(total);
+
+  const sub = await strapi.documents('api::submission.submission').findOne({
+    documentId: submissionDocumentId,
+    fields: ['score', 'number'] as any,
+    populate: { filing: { fields: ['documentId'] as any } } as any,
+  } as any);
+
+  const before = Number(sub?.score ?? 0);
+  if (before === rounded) {
+    if (log) console.log('[scoring] submission no-op (unchanged)', { submissionDocumentId, rounded });
+    return rounded;
+  }
+
+  await strapi.documents('api::submission.submission').update({
+    documentId: submissionDocumentId,
+    data: { score: rounded },
+    status: 'published',
+  } as any);
+
+  // Activity: score delta
+  try {
+    await strapi.service('api::activity-log.activity-log').append({
+      action: 'score',
+      entityType: 'submission',
+      entityId: submissionDocumentId,
+      beforeJson: { score: before },
+      afterJson: { score: rounded },
+      userId: opts?.userId ?? undefined,
+    });
+  } catch (_) {}
+
+  if (log) {
+    console.log('[scoring] recompute submission.score', {
+      submissionDocumentId,
+      questions: snaps.length,
+      totalRaw: total,
+      totalRounded: rounded,
+    });
+  }
+  return rounded;
+}

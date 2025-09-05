@@ -6,7 +6,29 @@
  * - Increase MAX_ROUNDS to allow more submitted rounds without changing logic.
  */
 
-export const MAX_ROUNDS = 4; // ← ONLY EVER MAKE THIS NUMBER EVEN AND ABOVE 2.
+// Resolve MAX_ROUNDS from env with guardrails
+const DEFAULT_MAX_ROUNDS = 4;
+
+function resolveMaxRoundsFromEnv(): number {
+  const raw = process.env.MAX_ROUNDS;
+  const n = raw ? Number(raw) : DEFAULT_MAX_ROUNDS;
+
+  // fallback if NaN or negative
+  let v = Number.isFinite(n) ? Math.floor(n) : DEFAULT_MAX_ROUNDS;
+
+  // enforce minimum 2
+  if (v < 2) v = 2;
+
+  // enforce even
+  if (v % 2 !== 0) v = v - 1; // round down to nearest even
+
+  // final guardrail
+  if (v < 2) v = 2;
+
+  return v;
+}
+
+export const MAX_ROUNDS: number = resolveMaxRoundsFromEnv();
 
 // Type surface (broad, so runtime guard still enforces MAX_ROUNDS)
 export type DraftStatus = 'draft';

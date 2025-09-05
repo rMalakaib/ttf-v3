@@ -1,6 +1,8 @@
 // path: src/api/filing/services/filing.ts
 import { factories } from '@strapi/strapi';
 import { randomUUID } from 'node:crypto';
+import { computeSnapshotRoundForTransition } from '../utils/submission-hooks';
+
 
 import {
   MAX_ROUNDS,
@@ -345,12 +347,24 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
       }
 
       // 4b) Custom hook (e.g., snapshot Submission)
+
+      function coerceActorUserId(id: unknown): number | undefined {
+        const n =
+          typeof id === 'number' ? id :
+          typeof id === 'string' ? Number(id) :
+          NaN;
+        return Number.isFinite(n) ? n : undefined;
+      }
+
+      const actorId = coerceActorUserId(actorUserId);
+
       const sideEffectsResult = await this.runTransitionSideEffects?.({
         trx,
         filing: pre,
         from,
         to: next,
         action,
+        actorUserId: actorId,
       });
 
       // Safely narrow (void | { submissionDocumentId?: string })
@@ -390,6 +404,17 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         transacting: trx as any,
       } as any);
 
+      // 6b) Post-write: if we just entered a client-edit stage (even round), carry-forward + reset
+      if (isClientEditStage(next)) {
+        const id = updated?.documentId ?? filingDocumentId; // <- use a real id in scope
+
+        await strapi.service('api::submission.submission')
+          .carryForwardAuditorGuidanceToDrafts(id);
+
+        await strapi.service('api::submission.submission')
+          .resetDraftModelFieldsForFiling(id);
+      }
+
       // 7) Activity log (best-effort)
       await createActivityLog(
         strapi,
@@ -422,17 +447,32 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
     // no-op for now
   },
 
-  /** Optional side-effects hook — may also throw PREREQ_FAILED if snapshotting detects issues */
-  async runTransitionSideEffects(_opts: {
-    trx: any;
-    filing: any;
-    from: FilingStatus;
-    to: FilingStatus;
-    action: Action;
-  }): Promise<{ submissionDocumentId?: string } | void> {
-    // no-op for now
-    return;
-  },
+  /** Optional side-effects hook — creates Submission snapshots when required */
+  /** Optional side-effects hook — creates Submission snapshots when required */
+  async runTransitionSideEffects(opts: {
+      trx: any;
+      filing: any;
+      from: FilingStatus;          // ← use canonical type
+      to: FilingStatus;            // ← use canonical type
+      action: string;              // your Action type if you have one
+      actorUserId?: number | null; // keep numeric user id (null if unknown)
+    }): Promise<{ submissionDocumentId?: string } | void> {
+      const { filing, from, to, actorUserId } = opts;
+
+      // Decide if this transition requires a snapshot; computes the exact round number.
+      const roundNumber = computeSnapshotRoundForTransition(from, to);
+      if (roundNumber == null) return; // no-op
+
+      const { submissionDocumentId } = await strapi
+        .service('api::submission.submission')
+        .createSubmissionSnapshot({
+          filingDocumentId: filing.documentId,
+          actorUserId: actorUserId ?? null,
+          roundNumber, // strict 1..MAX_ROUNDS inside the submission service
+        });
+
+      return { submissionDocumentId };
+    },
 
   /* ---------------------------------------------------------------
    * Existing helpers

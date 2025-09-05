@@ -931,12 +931,12 @@ export interface ApiSubmissionSubmission extends Struct.CollectionTypeSchema {
       Schema.Attribute.Required &
       Schema.Attribute.SetMinMax<
         {
-          max: 4;
           min: 1;
         },
         number
       >;
     publishedAt: Schema.Attribute.DateTime;
+    score: Schema.Attribute.Decimal;
     submission_answers: Schema.Attribute.Relation<
       'oneToMany',
       'api::submission-answer.submission-answer'

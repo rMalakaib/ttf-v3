@@ -14,8 +14,7 @@
     "number": {
       "type": "integer",
       "required": true,
-      "min": 1,
-      "max": 4
+      "min": 1
     },
     "submittedAt": {
       "type": "datetime",
@@ -41,6 +40,9 @@
       "relation": "oneToMany",
       "target": "api::submission-answer.submission-answer",
       "mappedBy": "submission"
+    },
+    "score": {
+      "type": "decimal"
     }
   }
 }
