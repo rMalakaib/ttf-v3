@@ -363,35 +363,56 @@ export default factories.createCoreService('api::submission.submission', ({ stra
     return { updated };
   },
 
-  /** Reset model fields on current drafts to start a new client-edit round cleanly. */
-  async resetDraftModelFieldsForFiling(filingDocumentId: string): Promise<number> {
-    const drafts = await strapi.documents('api::answer-revision.answer-revision').findMany({
-      publicationState: 'preview',
-      filters: { isDraft: true, filing: { documentId: filingDocumentId } },
-      fields: ['documentId'] as any,
-      populate: [],
-      pagination: { pageSize: 5000 },
-    } as any);
+  /** Reset model fields on current drafts for a clean client-edit round.
+ *  - If NO auditorScore: preserve modelScore; clear modelReason/modelSuggestion.
+ *  - If HAS auditorScore: clear ALL model fields (modelScore -> 0; reasons/suggestions -> '').
+ */
+    async resetDraftModelFieldsForFiling(filingDocumentId: string): Promise<number> {
+        const drafts = await strapi.documents('api::answer-revision.answer-revision').findMany({
+            publicationState: 'preview',
+            filters: { isDraft: true, filing: { documentId: filingDocumentId } },
+            fields: ['documentId', 'auditorScore'] as any,
+            populate: [],
+            pagination: { pageSize: 5000 },
+        } as any);
 
-    let n = 0;
-    for (const d of drafts as any[]) {
-      await strapi.documents('api::answer-revision.answer-revision').update({
-        documentId: d.documentId,
-        data: { modelReason: '', modelSuggestion: '' },
-        status: 'published',
-      } as any);
-      n++;
-    }
+        let updated = 0;
+        let clearedAll = 0;
+        let clearedPartial = 0;
 
-    await logActivity(
-      strapi,
-      'edit',
-      'filing',
-      filingDocumentId,
-      null,
-      { event: 'reset_draft_model_fields', updated: n }
-    );
+        for (const d of drafts as any[]) {
+            const hasAuditor = d?.auditorScore != null;
 
-    return n;
-  },
+            const data: any = {
+            modelReason: '',
+            modelSuggestion: '',
+            };
+
+            if (hasAuditor) {
+            data.modelScore = null; // clear modelScore only when auditorScore exists
+            clearedAll++;
+            } else {
+            clearedPartial++;
+            }
+
+            await strapi.documents('api::answer-revision.answer-revision').update({
+            documentId: d.documentId,
+            data,
+            status: 'published',
+            } as any);
+
+            updated++;
+        }
+
+        await logActivity(
+            strapi,
+            'edit',
+            'filing',
+            filingDocumentId,
+            null,
+            { event: 'reset_draft_model_fields', updated, clearedAll, clearedPartial }
+        );
+
+        return updated;
+    },
 }));

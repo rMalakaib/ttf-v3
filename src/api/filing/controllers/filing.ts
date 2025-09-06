@@ -100,4 +100,23 @@ export default factories.createCoreController('api::filing.filing', ({ strapi })
       return ctx.badRequest(err?.message ?? 'Finalize failed');
     }
   },
+
+   async recomputeFinalScore(ctx) {
+    const filingDocumentId = ctx.params?.id;
+    if (!filingDocumentId) return ctx.badRequest('Missing filing documentId');
+
+    // If you’re using users-permissions, this will be present when authenticated
+    const userId = ctx.state?.user?.id ?? null;
+
+    try {
+      const result = await strapi
+        .service('api::filing.filing')
+        .recomputeFinalScore({ filingDocumentId, userId });
+
+      ctx.body = { data: result };
+    } catch (err) {
+      const message = (err as any)?.message ?? 'Failed to recompute final score';
+      ctx.badRequest(message);
+    }
+  },
 }));

@@ -4,6 +4,7 @@ import {
   effectiveDraftScore,
   hasScoreChanged,
   recomputeFilingCurrentScore,
+  recomputeSubmissionScore,
 } from '../../../utils/scoring';
 
 type Id = string;
@@ -246,6 +247,37 @@ export default factories.createCoreService('api::answer-revision.answer-revision
     return { draft: updated, ...(updatedCurrentScore !== undefined ? { updatedCurrentScore } : {}) };
   },
 
+  /**
+   * Recompute all Submission.scores that reference this AnswerRevision (snapshot).
+   * Returns the list of affected submission documentIds.
+   */
+  async recomputeLinkedSubmissionScores({
+    revisionDocumentId,
+    userId,
+  }: { revisionDocumentId: string; userId?: number | null }) {
+    const links = await strapi
+      .documents('api::submission-answer.submission-answer')
+      .findMany({
+        publicationState: 'preview',
+        filters: { answer_revision: { documentId: revisionDocumentId } },
+        fields: ['documentId'] as any,
+        populate: { submission: { fields: ['documentId'] as any } } as any,
+        pagination: { pageSize: 5000 },
+      } as any);
+
+    const submissionIds = Array.from(
+      new Set(
+        (links as any[]).map((l) => l?.submission?.documentId).filter(Boolean)
+      )
+    );
+
+    for (const sid of submissionIds) {
+      await recomputeSubmissionScore(strapi, sid, { userId: userId ?? undefined });
+    }
+
+    return submissionIds;
+  },
+
   // ------------------------------------------------------------------------------------
   // PRIVATE — ChatGPT scoring helper
   // ------------------------------------------------------------------------------------
@@ -318,9 +350,15 @@ export default factories.createCoreService('api::answer-revision.answer-revision
 
     const auditorSuggestion: string | null = (draft as any)?.auditorSuggestion ?? null;
 
+          
+    const { normalLine, followupLine, systemPrompt } = await this.loadScoringPrompts(strapi);
+
+    const introLine = mode === 'normal' ? normalLine : followupLine;
+
     const sections: string[] =
       mode === 'normal'
         ? [
+            normalLine,
             `Instruction:\n${(question as any).prompt}`,
             `Example:\n${(question as any).example}`,
             `Scoring Criteria (can only score the numbers mentioned, nothing else):\n${(question as any).guidanceMarkdown}`,
@@ -329,7 +367,7 @@ export default factories.createCoreService('api::answer-revision.answer-revision
             `MaxScore: ${maxScore}`,
           ]
         : [
-            `Evaluate whether the answer fully addresses the Auditor suggestion. Be more linient on score, but specific in feedback.`,
+            followupLine,
             `Instruction:\n${(question as any).prompt}`,
             `Scoring Criteria (can only score the numbers mentioned, nothing else):\n${(question as any).guidanceMarkdown}`,
             `Auditor Suggestion to be addressed:\n${auditorSuggestion}`,
@@ -339,16 +377,14 @@ export default factories.createCoreService('api::answer-revision.answer-revision
             `MaxScore: ${maxScore}`,
           ];
 
-    const system = [
-      'You are an auditor for Blockworks. Interpret every protocol answer literally. Interpret Scoring Criteria literally',
-      'Always respond with ONLY a single JSON object with keys:',
-      'modelScore (number), modelReason (string), modelSuggestion (string).',
-    ].join(' ');
+    const system = [systemPrompt].join(' ');
 
     const userContent = sections.join('\n\n');
 
     const modelPromptRaw = {
       mode,
+      introLine,
+      systemText: systemPrompt,
       instruction: (question as any).prompt,
       example: (question as any).example,
       guidanceMarkdown: (question as any).guidanceMarkdown,
@@ -408,12 +444,25 @@ export default factories.createCoreService('api::answer-revision.answer-revision
       status: 'published',
     } as any);
 
+    // await this.logActivity({
+    //   action: 'score',
+    //   entityType: 'answer-revision',
+    //   entityId: (draft as any).documentId,
+    //   afterJson: {
+    //     promptMeta: { mode, introLine, systemPrompt }
+    //   },
+    //   userId: undefined,
+    // });
+
     return updated;
   },
 
   // ------------------------------------------------------------------------------------
   // INTERNAL HELPERS (typed to avoid compile errors; cast where relations are read)
   // ------------------------------------------------------------------------------------
+  
+  
+  
   async assertCoherence(filingDocumentId: Id, questionDocumentId: Id) {
     const filing = await strapi.documents('api::filing.filing').findOne({
       documentId: filingDocumentId,
@@ -511,4 +560,23 @@ export default factories.createCoreService('api::answer-revision.answer-revision
       // swallow logging failures
     }
   },
+
+  async loadScoringPrompts(strapi: any) {
+      const p = await strapi.documents('api::scoring-prompt.scoring-prompt').findFirst({
+        fields: ['normalLine','followupLine','systemPrompt'] as any,
+        populate: [],
+      } as any);
+      return {
+        normalLine:   p?.normalLine   ?? "Evaluate whether the answer fully addresses the Auditor suggestion. Be strict, and specific in feedback.",
+        followupLine: p?.followupLine ?? "Evaluate whether the answer fully addresses the Auditor suggestion. Be more lenient on score, but specific in feedback.",
+        systemPrompt: p?.systemPrompt ?? [
+          "You are an auditor for Blockworks. Interpret every protocol answer literally. Interpret Scoring Criteria literally",
+          "Always respond with ONLY a single JSON object with keys:",
+          "modelScore (number), modelReason (string), modelSuggestion (string)."
+        ].join(' ')
+      };
+    },
+
+
+
 }));

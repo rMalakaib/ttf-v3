@@ -2,6 +2,8 @@
 import { factories } from '@strapi/strapi';
 import { randomUUID } from 'node:crypto';
 import { computeSnapshotRoundForTransition } from '../utils/submission-hooks';
+import { recomputeFilingFinalScore } from '../../../utils/scoring';
+import { recomputeFilingCurrentScore } from '../../../utils/scoring';
 
 
 import {
@@ -145,78 +147,80 @@ async function createActivityLog(
  * - Copies client/model fields + auditor guidance
  * - Skips creation if target drafts already exist (idempotent)
  */
+// REPLACE the whole function body with the version below (same signature & imports)
+  /* =================================================================== */
+/* Step 14: Spawn/refresh client drafts from prior submitted snapshots  */
+/*  - Overwrite existing draft per (filing, question); create if none  */
+/* =================================================================== */
 async function spawnDraftsForNextClientStage(opts: {
-  strapi: any;
-  trx: any;
-  filingDocumentId: string;
-  from: FilingStatus; // auditor-review stage (v1, v3, …)
-  to: FilingStatus;   // client-edit stage (v2, v4, …)
-}): Promise<{ created: number }> {
-  const { strapi, trx, filingDocumentId, from, to } = opts;
+    strapi: any;
+    trx: any;
+    filingDocumentId: string;
+    from: FilingStatus; // auditor-review stage (v1, v3, …)
+    to: FilingStatus;   // client-edit stage (v2, v4, …)
+  }): Promise<{ updated: number; created: number }> {
+    const { strapi, trx, filingDocumentId, from, to } = opts;
 
-  if (!(isAuditorReviewStage(from) && isClientEditStage(to))) {
-    return { created: 0 };
-  }
+    if (!(isAuditorReviewStage(from) && isClientEditStage(to))) {
+      return { updated: 0, created: 0 };
+    }
 
-  const prevRound = submittedIndex(from as any);      // 1,3,5...
-  const targetRound = prevRound + 1;                  // 2,4,6...
+    const prevRound = submittedIndex(from as any); // 1,3,5...
+    const targetRound = prevRound + 1;             // 2,4,6...
 
-  // If drafts already exist for the target round, don't duplicate
-  const existing = await strapi.documents('api::answer-revision.answer-revision').findMany({
-    filters: {
-      filing: { documentId: filingDocumentId },
-      isDraft: true,
-      revisionIndex: targetRound,
-    },
-    fields: ['id'] as any,
-    populate: [],
-    pagination: { pageSize: 1 },
-    // @ts-ignore
-    transacting: trx as any,
-  } as any);
+    // Pull prior round snapshots (one per question)
+    const snapshots = await strapi.documents('api::answer-revision.answer-revision').findMany({
+      publicationState: 'preview',
+      filters: {
+        filing: { documentId: filingDocumentId },
+        isDraft: false,
+        revisionIndex: prevRound,
+      },
+      fields: [
+        'documentId',
+        'revisionIndex',
+        'answerText',
+        'modelPromptRaw',
+        'modelResponseRaw',
+        'modelScore',
+        'modelReason',
+        'modelSuggestion',
+        'latencyMs',
+        'auditorScore',
+        'auditorReason',
+        'auditorSuggestion',
+      ] as any,
+      populate: { question: { fields: ['documentId'] as any } } as any,
+      pagination: { pageSize: 1000 },
+      // @ts-ignore
+      transacting: trx as any,
+    } as any);
 
-  if (Array.isArray(existing) && existing.length > 0) {
-    return { created: 0 };
-  }
+    let updated = 0;
+    let created = 0;
 
-  // Fetch prior submitted snapshots (non-draft) for prevRound
-  const snapshots = await strapi.documents('api::answer-revision.answer-revision').findMany({
-    filters: {
-      filing: { documentId: filingDocumentId },
-      isDraft: false,
-      revisionIndex: prevRound,
-    },
-    fields: [
-      'revisionIndex',
-      'answerText',
-      'modelPromptRaw',
-      'modelResponseRaw',
-      'modelScore',
-      'modelReason',
-      'modelSuggestion',
-      'latencyMs',
-      'auditorScore',
-      'auditorReason',
-      'auditorSuggestion',
-    ] as any,
-    populate: {
-      question: { fields: ['id'] as any }, // documentId will still be present
-    } as any,
-    pagination: { pageSize: 1000 }, // reasonable cap
-    // @ts-ignore
-    transacting: trx as any,
-  } as any);
+    for (const snap of Array.isArray(snapshots) ? snapshots : []) {
+      const qDocId = snap?.question?.documentId;
+      if (!qDocId) continue;
 
-  let created = 0;
+      // Try to find an existing draft for this (filing, question)
+      const existingDraft = await strapi.documents('api::answer-revision.answer-revision').findFirst({
+        publicationState: 'preview',
+        filters: {
+          isDraft: true,
+          filing: { documentId: filingDocumentId },
+          question: { documentId: qDocId },
+        },
+        fields: ['documentId'] as any,
+        // @ts-ignore
+        transacting: trx as any,
+      } as any);
 
-  for (const snap of Array.isArray(snapshots) ? snapshots : []) {
-    const qDocId = snap?.question?.documentId;
-    if (!qDocId) continue; // cannot spawn without a question
-
-    await strapi.documents('api::answer-revision.answer-revision').create({
-      data: {
+      const payload: any = {
+        // keep drafts as isDraft:true; bump revisionIndex to target round
         revisionIndex: targetRound,
         isDraft: true,
+
         // carry forward client/model content
         answerText: snap.answerText ?? '',
         modelPromptRaw: snap.modelPromptRaw ?? null,
@@ -225,25 +229,88 @@ async function spawnDraftsForNextClientStage(opts: {
         modelReason: snap.modelReason ?? null,
         modelSuggestion: snap.modelSuggestion ?? null,
         latencyMs: snap.latencyMs ?? null,
+
         // carry forward auditor guidance as read-only context
         auditorScore: snap.auditorScore ?? null,
         auditorReason: snap.auditorReason ?? null,
         auditorSuggestion: snap.auditorSuggestion ?? null,
-        // relations
-        filing: { documentId: filingDocumentId },
-        question: { documentId: qDocId },
-        // intentionally omit users_permissions_user; set it elsewhere if needed
-      },
-      status: 'published', // keep drafts visible to API; 'isDraft' governs workflow
-      // @ts-ignore
-      transacting: trx as any,
-    } as any);
+      };
 
-    created += 1;
+      if (existingDraft?.documentId) {
+        // OVERWRITE existing draft
+        await strapi.documents('api::answer-revision.answer-revision').update({
+          documentId: existingDraft.documentId,
+          data: payload,
+          status: 'published',
+          // @ts-ignore
+          transacting: trx as any,
+        } as any);
+        updated++;
+      } else {
+        // CREATE the single draft for this (filing, question)
+        await strapi.documents('api::answer-revision.answer-revision').create({
+          data: {
+            ...payload,
+            filing: { connect: [{ documentId: filingDocumentId }] },
+            question: { connect: [{ documentId: qDocId }] },
+          },
+          status: 'published',
+          // @ts-ignore
+          transacting: trx as any,
+        } as any);
+        created++;
+      }
+    }
+
+    return { updated, created };
   }
 
-  return { created };
+  /* =================================================================== */
+/* Step 14b: Recompute currentScore inside the current transaction      */
+/* =================================================================== */
+async function recomputeCurrentScoreTx(
+  strapi: any,
+  trx: any,
+  filingDocumentId: string
+): Promise<number> {
+  const rows = await strapi.documents('api::answer-revision.answer-revision').findMany({
+    publicationState: 'preview',
+    filters: { isDraft: true, filing: { documentId: filingDocumentId } },
+    fields: ['modelScore', 'auditorScore', 'updatedAt'] as any,
+    populate: { question: { fields: ['documentId'] as any } } as any,
+    sort: ['updatedAt:desc'],
+    pagination: { pageSize: 5000 },
+    // @ts-ignore
+    transacting: trx as any,
+  } as any);
+
+  const seen = new Set<string>();
+  let total = 0;
+  for (const r of rows as any[]) {
+    const qid = r?.question?.documentId;
+    if (!qid || seen.has(qid)) continue;
+    seen.add(qid);
+    const ms = r?.modelScore;
+    const as = r?.auditorScore;
+    const v = ms != null ? Number(ms) : (as != null ? Number(as) : 0);
+    if (Number.isFinite(v)) total += v;
+  }
+
+  const rounded = Math.round(total * 2) / 2;
+
+  await strapi.documents('api::filing.filing').update({
+    documentId: filingDocumentId,
+    data: { currentScore: rounded },
+    status: 'published',
+    // @ts-ignore
+    transacting: trx as any,
+  } as any);
+
+  return rounded;
 }
+
+
+
 
 /* =================================================================== */
 /* Service                                                              */
@@ -403,6 +470,32 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         // @ts-ignore - supported at runtime
         transacting: trx as any,
       } as any);
+      
+      // 6a) Post-write: if we just entered 'final', compute and persist the finalScore
+      if (next === 'final') {
+        const id = updated?.documentId ?? filingDocumentId;
+
+        const toNum = (v: unknown) =>
+          typeof v === 'number' ? v :
+          typeof v === 'string' ? Number(v) :
+          NaN;
+
+        const userIdNum = Number.isFinite(toNum(actorUserId)) ? Number(toNum(actorUserId)) : null;
+        // console.log('typeof recomputeFilingFinalScore', typeof recomputeFilingFinalScore);
+        await recomputeFilingFinalScore(strapi, id, { userId: userIdNum });
+
+        // ⬇️ re-fetch outside the transaction context so the response includes the new finalScore
+        const fresh = await strapi.documents('api::filing.filing').findOne({
+          documentId: id,
+          fields: ['finalScore'] as any,
+          populate: [],
+          // IMPORTANT: no `transacting: trx` here — we want the latest committed value
+        } as any);
+
+        (updated as any).finalScore = fresh?.finalScore ?? null;
+      }
+
+
 
       // 6b) Post-write: if we just entered a client-edit stage (even round), carry-forward + reset
       if (isClientEditStage(next)) {
@@ -413,6 +506,12 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
 
         await strapi.service('api::submission.submission')
           .resetDraftModelFieldsForFiling(id);
+      }
+
+      // 6c) Recompute currentScore when we enter a client-edit stage (auditor → client)
+      if (isClientEditStage(next)) {
+        const newScore = await recomputeCurrentScoreTx(strapi, trx, updated?.documentId ?? filingDocumentId);
+        (updated as any).currentScore = newScore;
       }
 
       // 7) Activity log (best-effort)
@@ -557,4 +656,15 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
 
     return { filing, firstQuestion };
   },
+
+    /* ---------------------------------------------------------------
+   *  recompute final score outside of a transition
+   * --------------------------------------------------------------- */
+  async recomputeFinalScore(opts: { filingDocumentId: string; userId?: number | null }) {
+    const { filingDocumentId, userId = null } = opts;
+    return await recomputeFilingFinalScore(strapi, filingDocumentId, { userId });
+  },
+
+  
+
 }));

@@ -565,6 +565,8 @@ export interface ApiFilingFiling extends Struct.CollectionTypeSchema {
         'v2_submitted',
         'v3_submitted',
         'v4_submitted',
+        'v5_submitted',
+        'v6_submitted',
         'final',
       ]
     > &
@@ -829,6 +831,36 @@ export interface ApiQuestionQuestion extends Struct.CollectionTypeSchema {
       'oneToMany',
       'api::submission-answer.submission-answer'
     >;
+    updatedAt: Schema.Attribute.DateTime;
+    updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
+      Schema.Attribute.Private;
+  };
+}
+
+export interface ApiScoringPromptScoringPrompt extends Struct.SingleTypeSchema {
+  collectionName: 'scoring_prompts';
+  info: {
+    displayName: 'scoringPrompt';
+    pluralName: 'scoring-prompts';
+    singularName: 'scoring-prompt';
+  };
+  options: {
+    draftAndPublish: true;
+  };
+  attributes: {
+    createdAt: Schema.Attribute.DateTime;
+    createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
+      Schema.Attribute.Private;
+    followupLine: Schema.Attribute.Text;
+    locale: Schema.Attribute.String & Schema.Attribute.Private;
+    localizations: Schema.Attribute.Relation<
+      'oneToMany',
+      'api::scoring-prompt.scoring-prompt'
+    > &
+      Schema.Attribute.Private;
+    normalLine: Schema.Attribute.Text;
+    publishedAt: Schema.Attribute.DateTime;
+    systemPrompt: Schema.Attribute.Text;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
@@ -1501,6 +1533,7 @@ declare module '@strapi/strapi' {
       'api::project.project': ApiProjectProject;
       'api::question-lock.question-lock': ApiQuestionLockQuestionLock;
       'api::question.question': ApiQuestionQuestion;
+      'api::scoring-prompt.scoring-prompt': ApiScoringPromptScoringPrompt;
       'api::secret-key.secret-key': ApiSecretKeySecretKey;
       'api::submission-answer.submission-answer': ApiSubmissionAnswerSubmissionAnswer;
       'api::submission.submission': ApiSubmissionSubmission;

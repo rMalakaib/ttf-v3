@@ -186,18 +186,6 @@ export async function recomputeSubmissionScore(
     status: 'published',
   } as any);
 
-  // Activity: score delta
-  try {
-    await strapi.service('api::activity-log.activity-log').append({
-      action: 'score',
-      entityType: 'submission',
-      entityId: submissionDocumentId,
-      beforeJson: { score: before },
-      afterJson: { score: rounded },
-      userId: opts?.userId ?? undefined,
-    });
-  } catch (_) {}
-
   if (log) {
     console.log('[scoring] recompute submission.score', {
       submissionDocumentId,
@@ -207,4 +195,58 @@ export async function recomputeSubmissionScore(
     });
   }
   return rounded;
+}
+
+
+// --- NEW: recompute a Filing's final score from newest drafts (model vs auditor) ---
+export async function recomputeFilingFinalScore(
+  strapi: any,
+  filingDocumentId: string,
+  opts?: { log?: boolean; userId?: number | null }
+): Promise<{ finalScore: number; modelTotal: number; auditedPrevTotal: number }> {
+  const log = opts?.log ?? LOG_ON;
+
+  // 1) Load newest drafts (one per question)
+  const drafts = await collectNewestDraftsByQuestion(strapi, filingDocumentId);
+
+  // 2) Compute totals (model-only vs auditor-only), then quantize to 0.5 grid
+  let modelSum = 0;
+  let auditorSum = 0;
+  for (const d of drafts) {
+    modelSum += Number(d?.modelScore ?? 0);
+    auditorSum += Number(d?.auditorScore ?? 0);
+  }
+  const modelTotal = quantizeToHalf(modelSum);
+  const auditedPrevTotal = quantizeToHalf(auditorSum);
+
+  // 3) Choose the higher of the two
+  const chosen = Math.max(modelTotal, auditedPrevTotal);
+
+  // 4) Read current filing to get the previous finalScore for logging
+  const filing = await strapi.documents('api::filing.filing').findOne({
+    documentId: filingDocumentId,
+    fields: ['documentId', 'finalScore'] as any,
+    populate: [],
+  } as any);
+
+  const before = filing?.finalScore ?? null;
+
+  // 5) Persist chosen value to filing.finalScore (published)
+  await strapi.documents('api::filing.filing').update({
+    documentId: filingDocumentId,
+    data: { finalScore: chosen },
+    status: 'published',
+  } as any);
+
+  if (log) {
+    console.log('[scoring] recompute filing.finalScore', {
+      filingDocumentId,
+      questions: drafts.length,
+      modelTotal,
+      auditedPrevTotal,
+      finalScore: chosen,
+    });
+  }
+
+  return { finalScore: chosen, modelTotal, auditedPrevTotal };
 }
