@@ -2,6 +2,8 @@
 // Step 5 (tightened) — only `answerText` is client-editable
 import { isAuditorReviewStage, isClientEditStage, type FilingStatus } from '../../filing/utils/status';
 
+
+
 type ActorRole = 'Authenticated' | 'auditor' | 'admin';
 
 function deriveActorRole(user: any): ActorRole {
@@ -33,6 +35,8 @@ async function log(strapi: any, opts: {
 const CLIENT_FIELDS  = new Set(['answerText']);
 const AUDITOR_FIELDS = new Set(['auditorScore','auditorReason','auditorSuggestion']);
 const IGNORED_FIELDS = new Set(['filing','question','users_permissions_user','submission_answers','revisionIndex','isDraft']);
+// Final-stage overrides: allow *only* numeric score fields on final snapshots
+const FINAL_ALLOWED_FIELDS = new Set(['modelScore','auditorScore']);
 
 export default async (policyContext: any, _config: unknown, { strapi }: { strapi: any }) => {
   const method = String(policyContext.request?.method ?? policyContext.request?.ctx?.method ?? '').toUpperCase();
@@ -44,6 +48,30 @@ export default async (policyContext: any, _config: unknown, { strapi }: { strapi
 
   const raw = policyContext.request?.body ?? {};
   const payload = (raw && typeof raw === 'object' && 'data' in raw) ? (raw as any).data : raw;
+
+  // EARLY BYPASS for the override endpoint (no status lookup here)
+    const path = String(
+      policyContext.request?.path ??
+      policyContext.request?.url ??
+      policyContext.request?.ctx?.url ??
+      ''
+    ).replace(/\/+$/, '');
+
+    const isOverrideRoute =
+      method === 'POST' &&
+      /\/api\/filings\/[^/]+\/final\/questions\/[^/]+\/override-score$/.test(path);
+
+    // role from ctx.state.user
+    const rawRole = (policyContext?.state?.user?.role?.name ?? policyContext?.request?.ctx?.state?.user?.role?.name ?? '')
+      .toString().trim().toLowerCase();
+    const _role = rawRole === 'administrator' ? 'admin' : rawRole;
+
+    if (isOverrideRoute) {
+      if (!(_role === 'auditor' || _role === 'admin')) {
+        return { status: 403, message: 'Only auditor/admin may use the override endpoint.' };
+      }
+      return true; // ✅ skip rest of policy; service checks "final" + recompute
+    }
 
   // ---------- CREATE (client drafts only; require answerText)
   if (method === 'POST') {
@@ -219,6 +247,41 @@ export default async (policyContext: any, _config: unknown, { strapi }: { strapi
       meta:{ step:5, role, method, status, isDraft:true, fieldsChanged }});
     return true;
   }
+
+    // ---- Final-stage carve-out: allow auditor/admin to change ONLY score/modelScore on final snapshots ----
+  if (status === 'final') {
+      const url = String(policyContext.request?.url ?? policyContext.request?.ctx?.url ?? '');
+      const method = String(policyContext.request?.method ?? policyContext.request?.ctx?.method ?? 'GET').toUpperCase();
+
+      // Matches: POST /filings/:id/final/questions/:questionId/override-score[ optional trailing slash or query ]
+      const isOverrideRoute =
+        method === 'POST' &&
+        /\/filings\/[^/]+\/final\/questions\/[^/]+\/override-score(?:\/|\?|$)/.test(url);
+
+      // Role gate
+      if (!(role === 'auditor' || role === 'admin')) {
+        await log(strapi, { allow:false, entityId:documentId, userId, payload,
+          meta:{ step:5, reason:'final: role must be auditor/admin', url, role, method, status }});
+        return { status:403, message:'Only auditor/admin may modify final snapshots.' };
+      }
+
+      // Route gate — only the override endpoint is allowed in FINAL
+      if (!isOverrideRoute) {
+        await log(strapi, { allow:false, entityId:documentId, userId, payload,
+          meta:{ step:5, reason:'final: only override route allowed', url, role, method, status }});
+        return {
+          status: 403,
+          message: 'In final, only POST /filings/:id/final/questions/:questionId/override-score is allowed.',
+        };
+      }
+
+      // ✅ allow — service enforces mapping to final submission + recompute
+      await log(strapi, { allow:true, entityId:documentId, userId, payload,
+        meta:{ step:5, reason:'final: override route', url, role, method, status }});
+      return true;
+    }
+
+
 
   await log(strapi, { allow:false, entityId:documentId, userId, payload,
     meta:{ step:5, reason:'deny-writes (final/unknown stage)', role, method, status, isDraft, fieldsChanged }});

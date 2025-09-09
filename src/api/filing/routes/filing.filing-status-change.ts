@@ -11,19 +11,19 @@ export default {
       method: 'POST',
       path: '/filings/:id/submit',
       handler: 'filing.submit',
-      config: { policies: [], middlewares: [] },
+      config: { policies: ['api::filing.require-project-membership'], middlewares: [] },
     },
     {
       method: 'POST',
       path: '/filings/:id/advance',
       handler: 'filing.advance',
-      config: { policies: [], middlewares: [] },
+      config: { policies: ['api::filing.require-project-membership'], middlewares: [] },
     },
     {
       method: 'POST',
       path: '/filings/:id/finalize',
       handler: 'filing.finalize',
-      config: { policies: [], middlewares: [] },
+      config: { policies: ['api::filing.require-project-membership'], middlewares: [] },
     },
   ],
 };

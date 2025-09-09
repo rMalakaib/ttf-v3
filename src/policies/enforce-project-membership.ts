@@ -1,5 +1,5 @@
 // path: src/policies/enforce-project-membership.ts
-// Reusable policy: only allow writes if user is a member of the related Project.
+// Reusable policy: only allow writes/reads if user is a member of the related Project.
 // Admin + Auditor may write to all projects. Works with Documents API shapes.
 
 type ActorRole = 'Authenticated' | 'auditor' | 'admin';
@@ -73,7 +73,11 @@ export default async (policyContext: any, config: any, { strapi }: { strapi: any
   const logOn  = shouldLog(config);
 
   // Only guard writes
-  if (!['POST','PUT','PATCH','DELETE'].includes(method)) return true;
+  const isWrite = ['POST','PUT','PATCH','DELETE'].includes(method);
+  const isRead  = ['GET','HEAD'].includes(method);
+  // Let OPTIONS etc. pass through
+  if (!isWrite && !isRead) return true;
+
 
   const user   = policyContext.state?.user;
   const userId = user?.id ?? null;
@@ -128,7 +132,7 @@ export default async (policyContext: any, config: any, { strapi }: { strapi: any
         const filingDocId = policyContext.params?.id ?? null;
         if (!filingDocId) {
           await writeActivity(strapi, logOn, {
-            allow:false, reason:'filing.write missing id param', entityType, entityId:'unknown', userId,
+            allow:false, reason:'filing read/write missing id param', entityType, entityId:'unknown', userId,
             meta:{ method, path, role },
           });
           return { status:400, message:'Missing filing documentId' };
@@ -196,7 +200,7 @@ export default async (policyContext: any, config: any, { strapi }: { strapi: any
           entityIdForLog = revDocId;
         } else {
           await writeActivity(strapi, logOn, {
-            allow:false, reason:'rev.write missing id/filingId params', entityType, entityId:'unknown', userId,
+            allow:false, reason:'rev read/write missing id/filingId params', entityType, entityId:'unknown', userId,
             meta:{ method, path, role, params:policyContext.params },
           });
           return { status:400, message:'Missing answer-revision documentId or filingId param' };

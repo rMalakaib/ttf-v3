@@ -11,6 +11,7 @@ export default {
       handler: 'secret-key.rotateKey',
       config: {
         policies: [
+          'api::secret-key.require-project-membership'
           // e.g., 'global::require-client-membership',
           // e.g., 'global::require-project-admin',
         ],
@@ -27,6 +28,7 @@ export default {
       handler: 'secret-key.revokeKey',
       config: {
         policies: [
+          'api::secret-key.require-project-membership'
           // e.g., 'global::require-client-membership',
           // e.g., 'global::require-project-admin',
         ],
@@ -43,6 +45,7 @@ export default {
       handler: 'secret-key.listAll',
       config: {
         policies: [
+          'api::secret-key.require-project-membership'
           // e.g., 'global::require-client-membership',
           // or if auditors have read access: 'global::allow-auditor-or-project-member'
         ],
@@ -59,6 +62,7 @@ export default {
       handler: 'secret-key.listActive',
       config: {
         policies: [
+          'api::secret-key.require-project-membership'
           // e.g., 'global::require-client-membership',
           // or 'global::allow-auditor-or-project-member'
         ],

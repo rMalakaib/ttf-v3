@@ -6,7 +6,7 @@ export default {
       path: '/filings/:filingId/questions/:questionId/draft',
       handler: 'answer-revision.getDraft',
       config: {
-        policies: [],           // optionally: [{ name:'global::enforce-project-membership', config:{ target:'answer-revision' } }]
+        policies: [{ name: 'global::enforce-project-membership', config: { target: 'answer-revision' }}],           // optionally: [{ name:'global::enforce-project-membership', config:{ target:'answer-revision' } }]
         middlewares: [],
       },
     },
@@ -31,7 +31,7 @@ export default {
       path: '/filings/:filingId/questions/:questionId/revisions',
       handler: 'answer-revision.listRevisions',
       config: {
-        policies: [],           // optionally: [{ name:'global::enforce-project-membership', config:{ target:'answer-revision' } }]
+        policies: [{ name: 'global::enforce-project-membership', config: { target: 'answer-revision' }}],           // optionally: [{ name:'global::enforce-project-membership', config:{ target:'answer-revision' } }]
         middlewares: [],
       },
     },

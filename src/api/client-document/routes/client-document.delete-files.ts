@@ -5,7 +5,7 @@ export default {
       method: 'DELETE',
       path: '/client-documents/:id/files/:ids', // :ids = "12" or "12,34,56"
       handler: 'client-document.deleteFiles',
-      config: { policies: [], middlewares: [] },
+      config: { policies: ['api::client-document.require-project-membership'], middlewares: [] },
     },
   ],
 };

@@ -24,4 +24,33 @@ export default factories.createCoreController('api::submission.submission', ({ s
       submittedAt: sub.submittedAt ?? null,
     };
   },
+
+   /**
+   * GET /filings/:filingDocumentId/submissions/:number/questions/:questionDocumentId/answer-revision
+   */
+  async answerRevisionForQuestion(ctx) {
+    const { filingDocumentId, number, questionDocumentId } = ctx.params;
+
+    const submissionNumber = Number.parseInt(String(number), 10);
+    if (!Number.isFinite(submissionNumber) || submissionNumber < 1) {
+      return ctx.badRequest('Invalid "number" param: must be an integer >= 1');
+    }
+
+    // Delegate to service
+    const answerRevision = await strapi
+      .service('api::submission.submission')
+      .findAnswerRevisionForQuestion({
+        filingDocumentId: String(filingDocumentId),
+        submissionNumber,
+        questionDocumentId: String(questionDocumentId),
+        previewFallback: true, // if the answer_revision was never published, still return it
+      });
+
+    if (!answerRevision) {
+      return ctx.notFound('AnswerRevision not found for the given filing/submission/question');
+    }
+
+    // You can sanitize/transform if you prefer; returning raw is fine for internal APIs.
+    ctx.body = answerRevision;
+  },
 }));

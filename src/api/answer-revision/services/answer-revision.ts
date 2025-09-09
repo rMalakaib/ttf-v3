@@ -5,6 +5,7 @@ import {
   hasScoreChanged,
   recomputeFilingCurrentScore,
   recomputeSubmissionScore,
+  recomputeFilingFinalScore
 } from '../../../utils/scoring';
 
 type Id = string;
@@ -129,8 +130,6 @@ export default factories.createCoreService('api::answer-revision.answer-revision
 
         return draft;   
     },
-  
-  
     /**
    * PUBLIC — Called by the controller on PUT /filings/:filingId/questions/:questionId/draft
    * Saves the draft's answerText, runs ChatGPT scoring, and conditionally recomputes filing.currentScore.

@@ -7,18 +7,18 @@ import { factories } from '@strapi/strapi';
 export default factories.createCoreRouter('api::filing.filing', {
   only: ['find', 'findOne', 'create', 'update', 'delete'],
   config: {
-    find:   { policies: [], middlewares: [] },
-    findOne:{ policies: [], middlewares: [] },
+    find:   { policies: ['api::filing.require-project-membership'], middlewares: [] },
+    findOne:{ policies: ['api::filing.require-project-membership'], middlewares: [] },
     create: {
-      policies: [],
+      policies: ['api::filing.require-project-membership'],
       // Block attempts to set filingStatus at creation time
       middlewares: ['api::filing.block-filingstatus'],
     },
     update: {
-      policies: [],
+      policies: ['api::filing.require-project-membership'],
       // Block attempts to set filingStatus via generic update
       middlewares: ['api::filing.block-filingstatus'],
     },
-    delete: { policies: [], middlewares: [] },
+    delete: { policies: ['api::filing.require-project-membership'], middlewares: [] },
   },
 });

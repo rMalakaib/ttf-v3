@@ -168,4 +168,35 @@ export default factories.createCoreController('api::framework-version.framework-
   const sanitized = await this.sanitizeOutput(entities, ctx);
   return this.transformResponse(sanitized);
   },
-}));
+
+    async listFinalScores(ctx) {
+    const frameworkVersionId = String(ctx.params?.frameworkVersionId || '').trim();
+    if (!frameworkVersionId) ctx.throw(400, 'frameworkVersionId is required');
+
+    // Optional finalizedAt range: ?start=YYYY-MM-DD&end=YYYY-MM-DD (inclusive)
+    const start = ctx.query?.start ? String(ctx.query.start) : null;
+    const end   = ctx.query?.end   ? String(ctx.query.end)   : null;
+
+    const results = await strapi
+      .service('api::framework-version.framework-version')
+      .listFinalScores({ frameworkVersionId, start, end });
+
+    // Plain JSON payload
+    ctx.body = { data: results, meta: { count: results.length } };
+  },
+
+  async listFilingsWithScores(ctx) {
+    const frameworkVersionId = String(ctx.params?.frameworkVersionId || '').trim();
+    if (!frameworkVersionId) ctx.throw(400, 'frameworkVersionId is required');
+
+    // Optional range on Submission.submittedAt: ?start=YYYY-MM-DD&end=YYYY-MM-DD (inclusive)
+    const start = ctx.query?.start ? String(ctx.query.start) : null;
+    const end   = ctx.query?.end   ? String(ctx.query.end)   : null;
+
+    const rows = await strapi
+      .service('api::framework-version.framework-version')
+      .listFilingsWithScores({ frameworkVersionId, start, end });
+
+    ctx.body = { data: rows, meta: { count: rows.length } };
+  },
+})); 

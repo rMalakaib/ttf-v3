@@ -119,4 +119,27 @@ export default factories.createCoreController('api::filing.filing', ({ strapi })
       ctx.badRequest(message);
     }
   },
+
+  /**
+   * POST /filings/:id/final/questions/:questionId/override-score
+   * Body: { score:number }  // or { value:number }
+   */
+  async overrideFinalAnswerScore(ctx) {
+    const filingDocumentId = ctx.params.id;
+    const questionDocumentId = ctx.params.questionId;
+
+    const body = (ctx.request?.body ?? {}) as Record<string, unknown>;
+    const raw = (body.score ?? body.value);
+    const value = Number(raw);
+
+    if (!Number.isFinite(value)) {
+      return ctx.badRequest('Body must include a finite number: { "score": number }');
+    }
+
+    const result = await strapi
+      .service('api::filing.filing')
+      .overrideFinalAnswerScore({ filingDocumentId, questionDocumentId, value });
+
+    ctx.body = result;
+  },
 }));

@@ -199,54 +199,69 @@ export async function recomputeSubmissionScore(
 
 
 // --- NEW: recompute a Filing's final score from newest drafts (model vs auditor) ---
-export async function recomputeFilingFinalScore(
-  strapi: any,
-  filingDocumentId: string,
-  opts?: { log?: boolean; userId?: number | null }
-): Promise<{ finalScore: number; modelTotal: number; auditedPrevTotal: number }> {
-  const log = opts?.log ?? LOG_ON;
+export async function recomputeFilingFinalScore(strapi, filingDocumentId, opts) {
+  const log = opts?.log ?? true;
+  const filing = await strapi.documents('api::filing.filing').findOne({
+    documentId: filingDocumentId,
+    fields: ['documentId', 'filingStatus', 'finalScore'] as any,
+  } as any);
 
-  // 1) Load newest drafts (one per question)
-  const drafts = await collectNewestDraftsByQuestion(strapi, filingDocumentId);
+  if (log) strapi.log.info(`[scoring.final] start filing=${filingDocumentId} status=${filing?.filingStatus}`);
 
-  // 2) Compute totals (model-only vs auditor-only), then quantize to 0.5 grid
-  let modelSum = 0;
-  let auditorSum = 0;
-  for (const d of drafts) {
-    modelSum += Number(d?.modelScore ?? 0);
-    auditorSum += Number(d?.auditorScore ?? 0);
+  let rows: Array<{ modelScore?: number; auditorScore?: number }> = [];
+
+  if (filing?.filingStatus === 'final') {
+    const [finalSub] = await strapi.documents('api::submission.submission').findMany({
+      publicationState: 'preview',
+      filters: { filing: { documentId: filingDocumentId } },
+      fields: ['documentId', 'number'] as any,
+      sort: ['number:desc'],
+      pagination: { pageSize: 1 },
+    } as any);
+
+    if (log) strapi.log.info(`[scoring.final] finalSub=${finalSub?.documentId} number=${finalSub?.number}`);
+
+    if (finalSub) {
+      // ⬇️ Pull scores from the linked answer_revision (not from submission-answer fields)
+      const sas = (await strapi.documents('api::submission-answer.submission-answer').findMany({
+        publicationState: 'preview',
+        filters: { submission: { documentId: finalSub.documentId } },
+        fields: ['documentId'] as any,
+        populate: ['answer_revision'] as any,
+        pagination: { pageSize: 5000 },
+      } as any)) as Array<any>;
+
+      rows = sas.map(sa => ({
+        modelScore: Number(sa?.answer_revision?.modelScore ?? 0),
+        auditorScore: Number(sa?.answer_revision?.auditorScore ?? 0),
+      }));
+    }
+  } else {
+    rows = await collectNewestDraftsByQuestion(strapi, filingDocumentId);
+  }
+
+  if (log) strapi.log.info(`[scoring.final] rows=${rows.length} sample=${JSON.stringify(rows?.[0] ?? {})}`);
+
+  // unchanged scoring logic
+  let perQuestionMaxSum = 0, modelSum = 0, auditorSum = 0;
+  for (const d of rows) {
+    const m = Number(d?.modelScore ?? 0);
+    const a = Number(d?.auditorScore ?? 0);
+    modelSum += m; auditorSum += a; perQuestionMaxSum += Math.max(m, a);
   }
   const modelTotal = quantizeToHalf(modelSum);
   const auditedPrevTotal = quantizeToHalf(auditorSum);
-
-  // 3) Choose the higher of the two
-  const chosen = Math.max(modelTotal, auditedPrevTotal);
-
-  // 4) Read current filing to get the previous finalScore for logging
-  const filing = await strapi.documents('api::filing.filing').findOne({
-    documentId: filingDocumentId,
-    fields: ['documentId', 'finalScore'] as any,
-    populate: [],
-  } as any);
+  const chosen = quantizeToHalf(perQuestionMaxSum);
 
   const before = filing?.finalScore ?? null;
-
-  // 5) Persist chosen value to filing.finalScore (published)
   await strapi.documents('api::filing.filing').update({
     documentId: filingDocumentId,
     data: { finalScore: chosen },
     status: 'published',
   } as any);
 
-  if (log) {
-    console.log('[scoring] recompute filing.finalScore', {
-      filingDocumentId,
-      questions: drafts.length,
-      modelTotal,
-      auditedPrevTotal,
-      finalScore: chosen,
-    });
-  }
+  if (log) strapi.log.info(`[scoring.final] before=${before} -> after=${chosen} (model=${modelTotal} auditor=${auditedPrevTotal})`);
 
   return { finalScore: chosen, modelTotal, auditedPrevTotal };
 }
+

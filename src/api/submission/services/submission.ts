@@ -5,6 +5,15 @@ import {
   recomputeSubmissionScore,
 } from '../../../utils/scoring';
 
+
+
+type FindARParams = {
+  filingDocumentId: string;
+  submissionNumber: number;
+  questionDocumentId: string;
+  previewFallback?: boolean;
+};
+
 type Id = string | number;
 
 /** Best-effort activity logging wrapper (uses activity-log service). */
@@ -415,4 +424,78 @@ export default factories.createCoreService('api::submission.submission', ({ stra
 
         return updated;
     },
+
+    async findAnswerRevisionForQuestion(params: FindARParams) {
+    const {
+      filingDocumentId,
+      submissionNumber,
+      questionDocumentId,
+      previewFallback = true,
+    } = params;
+
+    // 1) Find the Submission (published) by filing + number
+    const submissions = await strapi
+      .documents('api::submission.submission')
+      .findMany({
+        publicationState: 'live',
+        filters: {
+          number: submissionNumber,
+          filing: { documentId: filingDocumentId }, // ok to use in filters
+        },
+        fields: ['id', 'number'], // ← removed 'documentId'
+        populate: [],
+        sort: ['createdAt:desc'],
+        pagination: { pageSize: 1 },
+      });
+
+    const submission = submissions?.[0];
+    if (!submission) return null;
+
+    const fetchSA = async (publicationState: 'live' | 'preview') => {
+      const rows = await strapi
+        .documents('api::submission-answer.submission-answer')
+        .findMany({
+          publicationState,
+          filters: {
+            submission: { id: submission.id },
+            question: { documentId: questionDocumentId },
+          },
+          fields: ['id'],
+          populate: {
+            answer_revision: {
+              fields: [
+                'id',
+                'revisionIndex',
+                'answerText',
+                'modelScore',
+                'modelReason',
+                'modelSuggestion',
+                'auditorScore',
+                'auditorReason',
+                'auditorSuggestion',
+                'isDraft',
+                'latencyMs',
+                'createdAt',
+                'updatedAt',
+              ], // ← removed 'documentId'
+            },
+          },
+          sort: ['updatedAt:desc', 'createdAt:desc'],
+          pagination: { pageSize: 1 },
+        });
+
+      // @ts-ignore populated by query
+      return rows?.[0]?.answer_revision ?? null;
+    };
+
+    // Try frozen snapshot first
+    let answerRevision = await fetchSA('live');
+
+    // Optional fallback to preview if never published
+    if (!answerRevision && previewFallback) {
+      answerRevision = await fetchSA('preview');
+    }
+
+    return answerRevision;
+  },
 }));

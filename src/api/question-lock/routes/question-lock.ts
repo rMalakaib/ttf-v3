@@ -41,7 +41,7 @@ export default {
       handler: 'question-lock.status',
       config: {
         // Reads are open per your requirement (no read policy)
-        policies: [],
+        policies: [{ name: 'global::enforce-project-membership', config: { target: 'answer-revision' } }],
         middlewares: [],
       },
     },

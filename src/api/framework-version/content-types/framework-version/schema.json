@@ -39,6 +39,9 @@
     "version": {
       "type": "integer",
       "required": true
+    },
+    "totalScore": {
+      "type": "decimal"
     }
   }
 }

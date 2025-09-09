@@ -31,7 +31,7 @@ export default {
       path: '/projects/slug/:slug',
       handler: 'project.getBySlug',
       config: {
-        policies: [],    // e.g., add a read policy if needed
+        policies: ['api::project.require-project-membership'],    // e.g., add a read policy if needed
         middlewares: [], // e.g., caching, rate-limit, etc.
     },},
     {
@@ -39,7 +39,7 @@ export default {
       path: '/projects/:projectId/filings',
       handler: 'project.listFilingIds',
       config: {
-        policies: [],    // add membership/auditor policies as needed
+        policies: ['api::project.require-project-membership'],    // add membership/auditor policies as needed
         middlewares: [],
       },
     },

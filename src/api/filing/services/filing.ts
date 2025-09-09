@@ -576,23 +576,7 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
   /* ---------------------------------------------------------------
    * Existing helpers
    * --------------------------------------------------------------- */
-  async listByProject(opts: {
-    projectDocumentId: string;
-    filters?: any;
-    sort?: any;
-    fields?: any;
-    pagination?: any;
-  }) {
-    const { projectDocumentId, filters = {}, sort, fields, pagination } = opts;
-
-    return strapi.documents('api::filing.filing').findMany({
-      filters: { ...(filters ?? {}), project: { documentId: projectDocumentId } },
-      ...(fields ? { fields } : {}),
-      ...(sort ? { sort } : {}),
-      ...(pagination ? { pagination } : {}),
-      populate: [],
-    });
-  },
+  
 
   async bootstrap(opts: {
     projectDocumentId: string;
@@ -664,7 +648,94 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
     const { filingDocumentId, userId = null } = opts;
     return await recomputeFilingFinalScore(strapi, filingDocumentId, { userId });
   },
+  /**
+   * For a FINAL filing, set modelScore & auditorScore on the *specific* answerRevision
+   * (for the given question) that was snapshotted into the last submission,
+   * mirror the same into that submission-answer snapshot, then recompute finalScore.
+   */
+  async overrideFinalAnswerScore(opts: {
+    filingDocumentId: string;
+    questionDocumentId: string;
+    value: number;
+    log?: boolean;
+  }) {
+    const { filingDocumentId, questionDocumentId, value, log = true } = opts;
 
+    // 1) Filing must be FINAL
+    const filing = await strapi.documents('api::filing.filing').findOne({
+      documentId: filingDocumentId,
+      fields: ['documentId', 'filingStatus'] as any,
+    } as any);
+    if (!filing) throw new Error(`Filing not found: ${filingDocumentId}`);
+    if (filing.filingStatus !== 'final') {
+      throw new Error(`Filing must be in 'final' status (got '${filing.filingStatus}')`);
+    }
+
+    // 2) Get highest-numbered submission
+    const [finalSub] = await strapi.documents('api::submission.submission').findMany({
+      publicationState: 'preview',
+      filters: { filing: { documentId: filingDocumentId } },
+      fields: ['documentId', 'number'] as any,
+      sort: ['number:desc'],
+      pagination: { pageSize: 1 },
+    } as any);
+    if (!finalSub) throw new Error(`No submissions found for filing=${filingDocumentId}`);
+
+    // 3) Find the submission-answer for this question on that final submission.
+    //    IMPORTANT: schema uses 'answer_revision' (underscore)
+    const [sa] = (await strapi
+      .documents('api::submission-answer.submission-answer')
+      .findMany({
+        publicationState: 'preview',
+        filters: {
+          submission: { documentId: finalSub.documentId },
+          $or: [
+            { question: { documentId: questionDocumentId } },
+            { answer_revision: { question: { documentId: questionDocumentId } } },
+          ],
+        },
+        // no 'modelScore'/'auditorScore' fields on submission-answer
+        fields: ['documentId'] as any,
+        populate: ['answer_revision', 'answer_revision.question'] as any,
+        pagination: { pageSize: 1 },
+      } as any)) as Array<any>;
+
+    if (!sa) {
+      throw new Error(
+        `Final submission has no submission-answer for question=${questionDocumentId}`
+      );
+    }
+
+    // 4) Update ONLY the authoritative AnswerRevision (camelCase fields exist here)
+    const arDocId: string | undefined = sa?.answer_revision?.documentId;
+    if (!arDocId) throw new Error(`submission-answer lacks linked answer_revision`);
+    await strapi.documents('api::answer-revision.answer-revision').update({
+      documentId: arDocId,
+      data: {
+        modelScore: Number(value),   // if your DB requires string for decimals, use String(value)
+        auditorScore: Number(value),
+      },
+      status: 'published',
+    } as any);
+
+    // 5) Recompute finalScore (see small tweak in util below)
+    const { finalScore, modelTotal, auditedPrevTotal } = await recomputeFilingFinalScore(
+      strapi,
+      filingDocumentId,
+      { log }
+    );
+
+    return {
+      filingDocumentId,
+      finalSubmissionDocumentId: finalSub.documentId,
+      questionDocumentId,
+      answerRevisionDocumentId: arDocId,
+      overriddenScore: Number(value),
+      finalScore,
+      modelTotal,
+      auditedPrevTotal,
+    };
+  },
   
 
 }));
