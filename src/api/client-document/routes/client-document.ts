@@ -14,7 +14,7 @@ export default factories.createCoreRouter('api::client-document.client-document'
   only: ['find', 'findOne', 'create', 'update', 'delete'],
   config: {
     find: {
-      policies: [],
+      policies: ['api::client-document.require-project-membership'],
       middlewares: [],
     },
     findOne: {
@@ -22,7 +22,7 @@ export default factories.createCoreRouter('api::client-document.client-document'
       middlewares: [],
     },
     create: {
-      policies: [],
+      policies: ['api::client-document.require-project-membership'],
       middlewares: [],
     },
     update: {

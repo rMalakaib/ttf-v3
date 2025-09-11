@@ -102,7 +102,7 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
     };
   },
 
-  // Rotate by revoking ANY existing active keys for the project, then creating one fresh active key
+  // Rotate by revoking ANY existing active keys for the project, then creating one fresh active key or using the valuehash that was passed
   async rotateForProject(projectId: string, valueHash?: string, ttlMinutes?: number) {
     const project = await this.ensureProject(projectId);
     if (!project) throw new NotFoundError('Project not found');
@@ -134,6 +134,16 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
     const newKey = await strapi.documents('api::secret-key.secret-key').create({
       data: { valueHash: hash, keyState: 'active', expiresAt: expires, project: projectId },
     });
+
+    // --- ADD THIS: emit 'secret-key:rotated' (no secrets in payload) ---
+    // THIS IS A CRITICAL VULNERABILITY PASSING THE NON HASHED NON SALTED SECRET  
+    strapi.service('api::realtime-sse.pubsub').publish(
+      `project:${projectId}`,
+      `project:secret-key:rotated${projectId}`,
+      'project:secret-key:rotated',
+      { secretKey: secret, documentId: projectId, at: new Date().toISOString() }
+    );
+    // -------------------------------------------------------------------
 
     const payload: any = {
       id: newKey.documentId,

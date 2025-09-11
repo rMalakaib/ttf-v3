@@ -1,5 +1,6 @@
 // path: src/api/project/services/project.ts
 import { factories } from '@strapi/strapi';
+import { errors } from '@strapi/utils';
 import crypto from 'node:crypto';
 
 class NotFoundError extends Error { code = 'NOT_FOUND' as const; }
@@ -57,12 +58,41 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
 
         const projectId = created.documentId as string;
 
-        // Issue initial active key; if this fails, clean up the just-created project
+                // --- ADD THIS: emit 'projects:new-project-created' ---
+
+        const payload = {
+            documentId: created.documentId,            // or created.documentId if you prefer
+            slug: created.slug,
+            domain: created.domain,
+            createdByUserId: ownerUserId ?? null,
+            at: new Date().toISOString(),
+            };
+
+            // Get all admin/auditor ids
+        const adminAuditorIds = await strapi
+            .service('api::realtime-sse.targets')
+            .listUserIdsByRoleNames(['admin', 'auditor', 'administrator']);
+
+            // Fan-out to each admin/auditor
+            for (const uid of adminAuditorIds) {
+            await strapi.service('api::realtime-sse.pubsub').publish(
+                `user:${uid}`,
+                `user:new-project-created:state${uid}`,
+                'user:new-project-created:state',
+                payload
+            );
+
+        }
+            // -------------------------------------------------------------------
+
+
+        // Issue initial active key; if this fails
         try {
             await strapi.service('api::secret-key.secret-key').rotateForProject(projectId, valueHash);
         } catch (err) {
-            await strapi.documents('api::project.project').delete({ documentId: projectId });
-            throw err;
+             strapi.log.warn(
+                `[project:${projectId}] initial secret-key rotation failed: ${err?.message || err}`
+            );
         }
 
         // Return the published entity
@@ -148,7 +178,6 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
             users_permissions_users: {
                 fields: ['id', 'username', 'email', 'confirmed', 'blocked'],
                 sort: ['id:asc'],
-                pagination: { pageSize: 1000 },
             },
             },
         });
@@ -247,6 +276,101 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
         });
 
         return (rows || []).map(r => String((r as any).documentId));
-}
+},
+    async removeMembers({
+        projectDocumentId,
+        targetUserIds,
+        actorUserId,
+        actorRole,
+        reason,
+        }: {
+        projectDocumentId: string;
+        targetUserIds: number[];
+        actorUserId: number;
+        actorRole: 'admin' | 'auditor' | 'authenticated';
+        reason?: 'admin-remove' | 'self-remove';
+        }) {
+        if (!projectDocumentId || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+            throw new errors.ApplicationError('Missing projectDocumentId or targetUserIds');
+        }
+
+        // Ensure project exists (minimal fetch)
+        const project = await strapi.documents('api::project.project').findFirst({
+            filters: { documentId: projectDocumentId },
+            fields: ['slug'],
+        });
+        if (!project) throw new errors.NotFoundError('Project not found');
+
+        // Role rules:
+        // - admin/auditor: may remove any user(s)
+        // - authenticated (regular): may only remove self, and only if allowSelf=true
+        const isElevated = actorRole === 'admin' || actorRole === 'auditor';
+        const isSelfOnly = targetUserIds.length === 1 && targetUserIds[0] === actorUserId;
+
+        if (!isElevated && !isSelfOnly) {
+        throw new errors.ForbiddenError('Only admin/auditor may remove other users');
+        }
+
+        // (Optional) verify each target is currently a member; skip if you want idempotency
+        const memberCount = await strapi.documents('api::project.project').count({
+            filters: {
+            documentId: projectDocumentId,
+            users_permissions_users: { id: { $in: targetUserIds } },
+            },
+        });
+
+        // Activity log
+        try {
+            await strapi.documents('api::activity-log.activity-log').create({
+            status: 'published',
+            data: {
+                action: 'edit',
+                entityType: 'project.membership',
+                entityId: String(projectDocumentId),
+                beforeJson: {
+                reason: reason ?? (isSelfOnly ? 'self-remove' : 'admin-remove'),
+                actorUserId,
+                actorRole,
+                targetUserIds,
+                },
+                afterJson: {
+                removedUserIds: targetUserIds,
+                at: new Date().toISOString(),
+                },
+                // users_permissions_user: { connect: [actorUserId] }, // optional link to actor
+            },
+            });
+        } catch (e) {
+            strapi.log.warn('[project.removeMembers] failed to write activity log: %s', e?.message ?? e);
+        }
+
+        await strapi.documents('api::project.project').update({
+            documentId: projectDocumentId,
+            status: 'published',
+            data: {
+                users_permissions_users: {
+                disconnect: targetUserIds,   // 👈 removes links
+                },
+            },
+            });
+
+        if (memberCount < 1) {
+            // idempotent behavior: do nothing if none were members
+            return { removedUserIds: [], project };
+        };
+
+    // --- SSE: kick removed users off all live streams ---
+        try {
+        const sseBus = strapi.service('api::realtime-sse.pubsub');
+        for (const uid of targetUserIds) {
+            sseBus.disconnectAllForUser(Number(uid));
+        }
+        } catch (e: any) {
+        strapi.log?.warn?.('[project.removeMembers] SSE disconnectAllForUser failed: %s', e?.message ?? e);
+        }
+
+
+    return { removedUserIds: targetUserIds };
+    },
 
 }));

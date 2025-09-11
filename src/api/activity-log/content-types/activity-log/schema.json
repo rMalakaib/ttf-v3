@@ -19,7 +19,10 @@
         "score",
         "submit",
         "override",
-        "lock"
+        "lock",
+        "sse_subscribe",
+        "sse_publish",
+        "sse_disconnect"
       ]
     },
     "entityType": {

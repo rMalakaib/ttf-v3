@@ -50,6 +50,47 @@ export default factories.createCoreService('api::question-lock.question-lock', (
             status: 'published',
           } as any);
 
+
+          // --- [SSE EMIT] lock acquired/takeover (fire-and-forget) ---
+
+          // Minimal username lookup (no controller changes, no populate changes)
+        let holderUsername: string | null = null;
+        try {
+          const u = await strapi.entityService.findOne(
+            'plugin::users-permissions.user',
+            userId,
+            { fields: ['id', 'username'] }
+          );
+          holderUsername = u?.username ?? null;
+        } catch (e) {
+          strapi.log?.warn?.(`[question-lock.acquire] username lookup failed: ${e?.message ?? e}`);
+        }
+      try {
+        // If you have it handy, resolve the current draft AnswerRevision id; otherwise omit.
+        // const answerRevisionDocumentId = await this.findCurrentDraftRevisionId(filingDocumentId, questionDocumentId);
+        
+        const topic = `question:${filingDocumentId}:${questionDocumentId}`; // or `question:${filingDocumentId}:${questionDocumentId}:${answerRevisionDocumentId}`
+        const ttlSec = Math.max(
+          1,
+          Math.floor((new Date((created as any).lockExpiresAt).getTime() - nowTs.getTime()) / 1000)
+        );
+
+        await strapi.service('api::realtime-sse.pubsub').publish(
+          topic,
+          `question:lock:${filingDocumentId}:${questionDocumentId}:${Date.now()}`, // id
+          'question:lock',                                                        // event
+          {
+            holderUserId: userId,
+            holderUsername,
+            state: 'acquire',   // 'acquire' | 'refresh' | 'release'
+            ttlSec,
+            at: new Date().toISOString(),
+          }
+        );
+      } catch (e: any) {
+        strapi.log?.warn?.(`[question-lock.acquire] publish failed: ${e?.message ?? e}`);
+      }
+      // --- [/SSE EMIT] ---
       await this.logActivity({
         action: 'lock',
         entityType: 'question-lock',
@@ -143,6 +184,45 @@ export default factories.createCoreService('api::question-lock.question-lock', (
       data: { lockExpiresAt: addSeconds(nowTs, ttlSeconds).toISOString() },
       status: 'published',
     } as any);
+
+    // --- [SSE EMIT] lock heartbeat/refresh ---
+    const expiresAtIso = (renewed as any).lockExpiresAt;
+    const ttlSec = Math.max(
+      1,
+      Math.floor((new Date((renewed as any).lockExpiresAt).getTime() - nowTs.getTime()) / 1000)
+    );
+
+    let holderUsername: string | null = null;
+    try {
+      const u = await strapi.entityService.findOne(
+        'plugin::users-permissions.user',
+        userId,
+        { fields: ['id', 'username'] }
+      );
+      holderUsername = u?.username ?? null;
+    } catch (e: any) {
+      strapi.log?.warn?.(`[question-lock.heartbeat] username lookup failed: ${e?.message ?? e}`);
+    }
+
+    try {
+      const topic = `question:${filingDocumentId}:${questionDocumentId}`; // add :${answerRevisionId} if you include it
+      await strapi.service('api::realtime-sse.pubsub').publish(
+        topic,
+        `question:lock:${filingDocumentId}:${questionDocumentId}:${Date.now()}`, // id
+        'question:lock',                                                        // event
+        {
+          holderUserId: userId,
+          holderUsername,               // ← new
+          state: 'refresh',             // 'acquire' | 'refresh' | 'release'
+          ttlSec,
+          expiresAt: expiresAtIso,
+          at: new Date().toISOString(),
+        }
+      );
+    } catch (e: any) {
+      strapi.log?.warn?.(`[question-lock.heartbeat] publish failed: ${e?.message ?? e}`);
+    }
+    // --- [/SSE EMIT] ---
 
     return renewed;
   },

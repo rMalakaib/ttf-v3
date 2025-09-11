@@ -53,6 +53,16 @@ function parseBody(ctx: any) {
   return { data, files };
 }
 
+// Build the compact [{id, url}] list from your media field
+const mapUploadedFiles = (doc: any) => {
+  const media = doc?.document;
+  const arr = Array.isArray(media) ? media : (media ? [media] : []);
+  return arr
+    .filter((f: any) => f && f.id && f.url)
+    .map((f: any) => ({ id: Number(f.id), url: String(f.url) }));
+};
+
+
 export default factories.createCoreController(UID, ({ strapi }) => ({
   /** GET /api/client-documents?filingId=...&page=1&pageSize=25 */
   async find(ctx) {
@@ -82,10 +92,58 @@ export default factories.createCoreController(UID, ({ strapi }) => ({
 
   /** PUT /api/client-documents/:id  (JSON or multipart) */
   async update(ctx) {
+    const UID = 'api::client-document.client-document';
     const { id: documentId } = ctx.params;
+
+    // 1) Read BEFORE to compute a delta later
+    const before = await strapi.service(UID).findOne(documentId, {
+      populate: { document: true, filing: true } as any,
+    });
+
+    // 2) Apply update (JSON or multipart)
     const { data, files } = parseBody(ctx);
     const updated = await strapi.service(UID).update(documentId, { data, files });
-    const full = await strapi.service(UID).findOne(updated.documentId, { populate: defaultPopulate as any });
+
+    // 3) Read AFTER with relations we need for the SSE
+    const full = await strapi.service(UID).findOne(updated.documentId, {
+      populate: { document: true, filing: true } as any,
+    });
+
+    // Helper to normalize [{id, url}]
+    const mapUploadedFiles = (doc: any) => {
+      const media = doc?.document;
+      const arr = Array.isArray(media) ? media : (media ? [media] : []);
+      return arr
+        .filter((f: any) => f && f.id && f.url)
+        .map((f: any) => ({ id: Number(f.id), url: String(f.url) }));
+    };
+
+    // 4) Compute the delta: only files added in THIS update
+    const beforeIds = new Set((mapUploadedFiles(before) ?? []).map(f => f.id));
+    const afterFiles = mapUploadedFiles(full);
+    const addedFiles = afterFiles.filter(f => !beforeIds.has(f.id));
+
+    // 5) Emit SSE with only the newly-added files
+    try {
+      const filingDocumentId =
+        full?.filing?.documentId ?? full?.filing?.id ?? String(full?.filing);
+
+      if (filingDocumentId) {
+        await strapi.service('api::realtime-sse.pubsub').publish(
+          `filing:${filingDocumentId}`,
+          `filing:client-document:state:${filingDocumentId}:${documentId}:${Date.now()}`,
+          'filing:client-document:state',
+          {
+            documentId,
+            uploadedFiles: addedFiles,     // <<— now ONLY 205 & 206, not 203/204
+            at: new Date().toISOString(),
+          }
+        );
+      }
+    } catch (e) {
+      strapi.log.warn(`SSE publish failed (client-document:state, update): ${e?.message || e}`);
+    }
+
     const sanitized = await this.sanitizeOutput(full, ctx);
     return this.transformResponse(sanitized);
   },
@@ -93,67 +151,115 @@ export default factories.createCoreController(UID, ({ strapi }) => ({
   /** DELETE /api/client-documents/:id */
   async delete(ctx) {
     const { id: documentId } = ctx.params;
+
+    // Get filing id BEFORE the delete, since the record won’t exist afterward
+    let filingDocumentId: string | undefined;
+    try {
+      const before = await strapi.service(UID).findOne(documentId, {
+        populate: { filing: true } as any
+      });
+      filingDocumentId =
+        before?.filing?.documentId ?? before?.filing?.id ?? String(before?.filing);
+    } catch (_) { /* ignore */ }
+
     const removed = await strapi.service(UID).delete(documentId);
+
+    // --- SSE: tell collaborators the document is now absent (empty file list) ---
+      try {
+        if (filingDocumentId) {
+          await strapi.service('api::realtime-sse.pubsub').publish(
+            `filing:${filingDocumentId}`,
+            `filing:client-document:state:${filingDocumentId}`,
+            'filing:client-document:state',
+            { deletedClientDocument:documentId, at: new Date().toISOString() }
+          );
+        }
+      } catch (e) {
+        strapi.log.warn(`SSE publish failed (client-document:state, delete): ${e?.message || e}`);
+      }
+
     const sanitized = await this.sanitizeOutput(removed, ctx);
     return this.transformResponse(sanitized);
   },
 
-  async deleteFiles(ctx) {
-    const UID = 'api::client-document.client-document';
-    const { id: documentId, ids } = ctx.params;
+  // DELETE /api/client-documents/:id/files/:ids
+// :ids is a comma- or space-separated list of upload file ids (numbers)
+async deleteFiles(ctx) {
+  const UID = 'api::client-document.client-document';
+  const { id: documentId, ids } = ctx.params;
 
-    if (typeof ids !== 'string' || !ids.trim()) {
-        return ctx.badRequest('Provide comma-separated file ids in the path: /files/12,34');
+  // 1) Validate & normalize ids
+  if (typeof ids !== 'string' || !ids.trim()) {
+    return ctx.badRequest('Provide comma-separated file ids in the path: /files/12,34');
+  }
+  const fileIds = Array.from(
+    new Set(
+      ids.split(/[,\s]+/)
+         .map((s) => Number(s))
+         .filter((n) => Number.isFinite(n))
+    )
+  );
+  if (!fileIds.length) return ctx.badRequest('No valid numeric ids found in :ids.');
+
+  // 2) Read pre-delete state (must include filing to resolve topic)
+  const entry = await strapi.service(UID).findOne(documentId, {
+    populate: { document: true, filing: true } as any,
+  });
+  if (!entry) return ctx.notFound('ClientDocument not found');
+
+  const isMulti = Array.isArray(entry.document);
+  const currentFiles: any[] = isMulti
+    ? (entry.document ?? [])
+    : (entry.document ? [entry.document] : []);
+
+  const attachedIds = new Set<number>();
+  for (const f of currentFiles) if (f?.id) attachedIds.add(Number(f.id));
+
+  const targets = fileIds.filter((id) => attachedIds.has(id));
+  const ignored = fileIds.filter((id) => !attachedIds.has(id));
+  if (!targets.length) {
+    return ctx.badRequest('None of the provided ids are attached to this ClientDocument.');
+  }
+
+  // 3) Delta to emit (only the files being removed), from pre-delete state
+  const removedFiles = currentFiles
+    .filter((f: any) => f && targets.includes(Number(f.id)))
+    .map((f: any) => ({ id: Number(f.id), url: String(f.url) }));
+
+  // 4) Delete assets (Upload plugin) and unlink from the entry
+  for (const fid of targets) {
+    await strapi.entityService.delete('plugin::upload.file', fid);
+  }
+
+  if (isMulti) {
+    const keep = currentFiles
+      .filter((f: any) => !targets.includes(Number(f.id)))
+      .map((f: any) => Number(f.id));
+    await strapi.service(UID).update(documentId, { data: { document: keep } });
+  } else {
+    if (currentFiles[0]?.id && targets.includes(Number(currentFiles[0].id))) {
+      await strapi.service(UID).update(documentId, { data: { document: null } });
     }
+  }
 
-    // normalize :ids -> number[]
-    const fileIds = ids
-        .split(/[,\s]+/)
-        .map((s) => Number(s))
-        .filter((n) => Number.isFinite(n));
-
-    if (!fileIds.length) return ctx.badRequest('No valid numeric ids found in :ids.');
-
-    // NOTE: only populate the real field name "document"
-    const entry = await strapi.service(UID).findOne(documentId, { populate: { document: true } as any });
-    if (!entry) return ctx.notFound('ClientDocument not found');
-
-    // Your field is "document" and it's MULTIPLE (array)
-    const isMulti = Array.isArray(entry.document);
-
-    // Collect attached ids from "document"
-    const attached = new Set<number>();
-    if (isMulti) {
-        for (const f of entry.document) if (f?.id) attached.add(Number(f.id));
-    } else if (entry.document?.id) {
-        attached.add(Number(entry.document.id));
+  // 5) Emit delta (only removed files) to filing topic
+  try {
+    const filingDocumentId =
+      entry?.filing?.documentId ?? entry?.filing?.id ?? String(entry?.filing);
+    if (filingDocumentId && removedFiles.length) {
+      await strapi.service('api::realtime-sse.pubsub').publish(
+        `filing:${filingDocumentId}`,
+        `filing:client-document:state:${filingDocumentId}:${documentId}:removed:${Date.now()}`, // id
+        'filing:client-document:state',                                                         // event
+        { documentId, removedFiles, at: new Date().toISOString() }                      // payload = delta
+      );
     }
+  } catch (e) {
+    strapi.log.warn(`SSE publish failed (client-document:state, deleteFiles): ${e?.message || e}`);
+  }
 
-    const targets = fileIds.filter((id) => attached.has(id));
-    const ignored = fileIds.filter((id) => !attached.has(id));
-    if (!targets.length) {
-        return ctx.badRequest('None of the provided ids are attached to this ClientDocument.');
-    }
+  return ctx.send({ deletedFileIds: targets, ignoredFileIds: ignored }, 200);
+},
 
-    // Delete assets (Upload plugin)
-    for (const fid of targets) {
-        await strapi.entityService.delete('plugin::upload.file', fid);
-        // or: await strapi.service('plugin::upload.file').delete(fid);
-    }
-
-    // Unlink from the entry using the CORRECT key: "document"
-    if (isMulti) {
-        const keep = entry.document
-        .filter((f: any) => !targets.includes(Number(f.id)))
-        .map((f: any) => Number(f.id));
-        await strapi.service(UID).update(documentId, { data: { document: keep } });
-    } else {
-        if (entry.document?.id && targets.includes(Number(entry.document.id))) {
-        await strapi.service(UID).update(documentId, { data: { document: null } });
-        }
-    }
-
-    return ctx.send({ deletedFileIds: targets, ignoredFileIds: ignored }, 200);
- },
 
 }));

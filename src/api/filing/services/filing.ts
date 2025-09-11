@@ -81,60 +81,6 @@ type TransitionLog = {
   submissionDocumentId?: string | null;
 };
 
-async function createActivityLog(
-  strapi: any,
-  payload: TransitionLog,
-  trx?: any
-) {
-  // Emit an app event (best-effort)
-  try {
-    strapi.eventHub?.emit?.('filing.status.transition', payload);
-  } catch {
-    /* ignore */
-  }
-
-  // Persist to an Activity-like CT if present; otherwise log to server logs
-  const candidates = ['api::activity-log.activity-log', 'api::activity.activity'];
-  const uid = candidates.find((u) => !!strapi.getModel?.(u));
-
-  if (!uid) {
-    try {
-      strapi.log?.info?.(
-        `[filing.transition] ${payload.filingDocumentId}: ${payload.prevStatus} -> ${payload.newStatus} by ${payload.actorRole} (${payload.action})`
-      );
-    } catch {
-      /* ignore */
-    }
-    return;
-  }
-
-  try {
-    await strapi.documents(uid).create({
-      data: {
-        type: 'filing.status.transition',
-        filingDocumentId: payload.filingDocumentId,
-        prevStatus: payload.prevStatus,
-        newStatus: payload.newStatus,
-        actorRole: payload.actorRole,
-        action: payload.action,
-        actorUserId: payload.actorUserId ?? null,
-        reason: payload.reason ?? null,
-        context: payload.context ?? null,
-        submissionDocumentId: payload.submissionDocumentId ?? null,
-        occurredAt: new Date().toISOString(),
-      },
-      status: 'published',
-      // @ts-ignore - supported at runtime
-      transacting: trx as any,
-    } as any);
-  } catch (e) {
-    try {
-      strapi.log?.warn?.(`Activity log failed: ${(e as any)?.message ?? e}`);
-    } catch {
-      /* ignore */
-    }
-  }
-}
 
 /* =================================================================== */
 /* Step 14: Spawn client drafts from prior submitted snapshots          */
@@ -514,22 +460,28 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         (updated as any).currentScore = newScore;
       }
 
-      // 7) Activity log (best-effort)
-      await createActivityLog(
-        strapi,
-        {
-          filingDocumentId,
-          prevStatus: from,
-          newStatus: next,
-          actorRole,
-          action,
-          actorUserId: actorUserId ?? null,
-          reason: reason ?? null,
-          context: { ...(context as any), spawnedDrafts: spawned.created ?? 0 },
-          submissionDocumentId,
-        },
-        trx
-      );
+      try {
+        const id = filingDocumentId;
+        const payload = {
+          from,                                   // FilingStatus
+          to: next as FilingStatus,               // FilingStatus
+          documentId: id,
+          at: new Date().toISOString(),
+        };
+
+        // Deterministic-ish message id for replay/dedupe
+        const msgId = `filing:status:${id}`;
+
+        await strapi.service('api::realtime-sse.pubsub').publish(
+          `filing:${id}`,          // topic
+          msgId,                   // id
+          'filing:status',         // event
+          payload                  // payload
+        );
+      } catch (err) {
+        // Do not block the transaction on SSE fanout failures
+        strapi.log.warn?.(`SSE publish failed for filing:status ${filingDocumentId}: ${String((err as any)?.message || err)}`);
+      }
 
       return updated;
     });
@@ -582,8 +534,9 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
     projectDocumentId: string;
     familyDocumentId?: string;
     familyCode?: string;
+    title?: string;
   }) {
-    const { projectDocumentId, familyDocumentId, familyCode } = opts;
+    const { projectDocumentId, familyDocumentId, familyCode, title } = opts;
     if (!familyDocumentId && !familyCode) {
       throw new ServiceError('PREREQ_FAILED', 'Provide either familyDocumentId or familyCode');
     }
@@ -612,9 +565,47 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         currentScore: 0,
         project: { documentId: projectDocumentId },
         framework_version: { documentId: version.documentId },
+        ...(title ? { title } : {}),
       },
       status: 'published',
     });
+
+    // 2a) Create an empty ClientDocument linked to this filing (best-effort)
+    try {
+      const filingDocId = (filing as any)?.documentId ?? (filing as any)?.id;
+
+      await strapi.documents('api::client-document.client-document').create({
+        data: {
+          filing: { documentId: String(filingDocId) }, // one-to-one link
+          // document: []            // implicit empty
+          // users_permissions_user: { connect: [Number(ctx.state.user.id)] } // optional if you pass a user
+        },
+        status: 'published',
+        
+      });
+      
+    } catch (e: any) {
+      strapi.log?.warn?.(`[bootstrap] client-document create failed: ${e?.message ?? e}`);
+    }
+
+    /** --- SSE: project:filing:created -------------------------------------- */
+    try {
+      
+      const filingId = (filing as any)?.documentId ?? (filing as any)?.id;
+      const title = String((filing as any)?.title ?? '');
+      const status = (filing as any)?.filingStatus;
+
+      await strapi.service('api::realtime-sse.pubsub').publish(
+        `project:${projectDocumentId}`,
+        `project:filing:created:${filingId}`,
+        'project:filing:created',
+        { documentId: filingId, title: title, status: status, at: new Date().toISOString() }
+      );
+    } catch (err) {
+      // Non-fatal: creation succeeded; if publish/logging fails we just continue.
+      strapi.log.warn(`[SSE] project:filing:created emit failed: ${err?.message ?? err}`);
+    }
+  /** ---------------------------------------------------------------------- */
 
     // 3) First question (lean)
     const first = await strapi.documents('api::question.question').findMany({

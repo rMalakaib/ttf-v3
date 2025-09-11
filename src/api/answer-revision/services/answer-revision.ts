@@ -190,16 +190,6 @@ export default factories.createCoreService('api::answer-revision.answer-revision
         data: { answerText },
         status: 'published',
       } as any);
-
-      // Activity: edit
-      await this.logActivity({
-        action: 'edit',
-        entityType: 'answer-revision',
-        entityId: (draft as any).documentId,
-        beforeJson: { answerText: beforeText },
-        afterJson: { answerText },
-        userId: userId ?? undefined,
-      });
     }
 
     // 3) Score with ChatGPT (always attempt on save for now)
@@ -210,29 +200,7 @@ export default factories.createCoreService('api::answer-revision.answer-revision
         filingDocumentId,
         questionDocumentId,
       });
-
-      // Activity: score
-      await this.logActivity({
-        action: 'score',
-        entityType: 'answer-revision',
-        entityId: (draft as any).documentId,
-        afterJson: {
-          modelScore: (updated as any).modelScore,
-          modelReason: (updated as any).modelReason,
-          modelSuggestion: (updated as any).modelSuggestion,
-          latencyMs: (updated as any).latencyMs,
-        },
-        userId: userId ?? undefined,
-      });
     } catch (err: any) {
-      // Scoring failed; keep saved text. Log the error and return current draft.
-      await this.logActivity({
-        action: 'score',
-        entityType: 'answer-revision',
-        entityId: (draft as any).documentId,
-        afterJson: { error: String(err?.message ?? err) },
-        userId: userId ?? undefined,
-      });
       updated = draft; // fall back to pre-scoring draft
     }
 
@@ -242,6 +210,50 @@ export default factories.createCoreService('api::answer-revision.answer-revision
     if (hasScoreChanged(beforeEffective, afterEffective)) {
       updatedCurrentScore = await recomputeFilingCurrentScore(strapi,filingDocumentId);
     }
+
+    // --- after you have `updated` (post-score) and maybe updatedCurrentScore ---
+    // We’ll compare pre- vs post- to avoid noisy emits
+    const prev = draft as any;       // snapshot from before we updated/scored
+    const next = updated as any;     // snapshot after update + scoring
+
+    // Normalize helpers
+    const s = (v: unknown) => (v == null ? '' : String(v));
+    const f = (v: unknown) => (v == null || v === '' ? null : Number(v));
+
+    // Detect meaningful change (text or any model/auditor fields)
+    const changed =
+      s(prev.answerText)       !== s(next.answerText)       ||
+      f(prev.modelScore)       !== f(next.modelScore)       ||
+      s(prev.modelSuggestion)  !== s(next.modelSuggestion)  ||
+      s(prev.modelReason)      !== s(next.modelReason)      ||
+      f(prev.auditorScore)     !== f(next.auditorScore)     ||
+      s(prev.auditorSuggestion)!== s(next.auditorSuggestion)||
+      s(prev.auditorReason)    !== s(next.auditorReason);
+
+    if (changed) {
+      const revisionId = String(next.documentId ?? next.id); // your docs API uses documentId
+      const topic = `question:${filingDocumentId}:${questionDocumentId}:${revisionId}`;
+      const event = 'question:answer:state';
+      const msgId = `${event}:${revisionId}:${Date.now()}`;
+
+      // Payload per your request (map *Reason → *Reasoning for API shape)
+      const payload = {
+        revisionId,
+        answerText: s(next.answerText),
+        auditorScore: f(next.auditorScore),
+        auditorSuggestion: s(next.auditorSuggestion) || null,
+        auditorReasoning: s(next.auditorReason) || null,
+        modelScore: f(next.modelScore),
+        modelSuggestion: s(next.modelSuggestion) || null,
+        modelReasoning: s(next.modelReason) || null,
+        updatedAt: new Date().toISOString(),
+      };
+
+      // 4-arg form: (topic, id, event, data) — keeps a stable, replayable message id
+      await strapi.service('api::realtime-sse.pubsub')
+        .publish(topic, msgId, event, payload);
+    }
+
 
     return { draft: updated, ...(updatedCurrentScore !== undefined ? { updatedCurrentScore } : {}) };
   },

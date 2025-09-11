@@ -1,6 +1,14 @@
 // path: src/api/project/controllers/project.ts
 import { factories } from '@strapi/strapi';
 
+// helper to normalize role
+const roleOf = (user: any): 'admin' | 'auditor' | 'authenticated' => {
+  const n = String(user?.role?.name ?? '').toLowerCase();
+  if (n === 'admin' || n === 'administrator') return 'admin';
+  if (n === 'auditor') return 'auditor';
+  return 'authenticated';
+};
+
 export default factories.createCoreController('api::project.project', ({ strapi }) => ({
   /**
    * POST /projects/create
@@ -147,24 +155,42 @@ export default factories.createCoreController('api::project.project', ({ strapi 
  * Returns an array of Filing documentIds for the given Project.
  * Optional query: ?publicationState=preview to include drafts.
  */
-async listFilingIds(ctx) {
-  const { projectId } = ctx.params;
-  const publicationState =
-    (ctx.query?.publicationState === 'preview' ? 'preview' : 'live') as 'live' | 'preview';
+  async listFilingIds(ctx) {
+    const { projectId } = ctx.params;
+    const publicationState =
+      (ctx.query?.publicationState === 'preview' ? 'preview' : 'live') as 'live' | 'preview';
 
-  try {
-    const ids = await strapi.service('api::project.project').listFilingIdsForProject({
-      projectId,
-      publicationState,
+    try {
+      const ids = await strapi.service('api::project.project').listFilingIdsForProject({
+        projectId,
+        publicationState,
+      });
+
+        // Keep response minimal: just an array of strings
+        return this.transformResponse(ids);
+      } catch (e: any) {
+        if (typeof e.message === 'string' && e.message.startsWith('NOT_FOUND')) {
+          return ctx.notFound('Project not found');
+        }
+        throw e;
+      }
+    },
+
+
+  async removeMember(ctx) {
+    const { projectId, userId } = ctx.params;
+    const actor = ctx.state.user;
+    const actorRole = roleOf(actor);
+    const targetUserId = Number(userId);
+
+    const result = await strapi.service('api::project.project').removeMembers({
+      projectDocumentId: String(projectId),
+      targetUserIds: [Number(userId)],
+      actorUserId: Number(actor.id),
+      actorRole,
+      reason: 'admin-remove',
     });
 
-      // Keep response minimal: just an array of strings
-      return this.transformResponse(ids);
-    } catch (e: any) {
-      if (typeof e.message === 'string' && e.message.startsWith('NOT_FOUND')) {
-        return ctx.notFound('Project not found');
-      }
-      throw e;
-    }
+    ctx.body = { ok: true, removed: result.removedUserIds, project: result.project };
   }
 }));

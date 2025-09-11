@@ -1,12 +1,12 @@
 // src/api/project/policies/require-project-membership.ts
 import { errors } from '@strapi/utils';
 
-type ActorRole = 'admin' | 'auditor' | 'authenticated';
+type ActorRole = 'admin' | 'auditor' | 'Authenticated';
 const roleOf = (user: any): ActorRole => {
   const n = String(user?.role?.name ?? '').toLowerCase();
   if (n === 'admin' || n === 'administrator') return 'admin';
   if (n === 'auditor') return 'auditor';
-  return 'authenticated';
+  return 'Authenticated';
 };
 
 // fire-and-forget ActivityLog (but awaited so it lands before error short-circuits)

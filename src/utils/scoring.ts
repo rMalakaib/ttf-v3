@@ -102,6 +102,14 @@ export async function recomputeFilingCurrentScore(
       status: 'published',
     } as any);
 
+    // 2) publish SSE
+    await strapi.service('api::realtime-sse.pubsub').publish(
+      `filing:${filingDocumentId}`,           // topic
+      `filing:score:current:${filingDocumentId}`,                 // event name
+      'filing:score:current',                 // event name
+      { currentScore: rounded, documentId: filingDocumentId, at: new Date().toISOString() } // payload
+    );
+
   if (log) {
     console.log('[scoring] recompute currentScore', {
       filingDocumentId,
@@ -174,6 +182,8 @@ export async function recomputeSubmissionScore(
     populate: { filing: { fields: ['documentId'] as any } } as any,
   } as any);
 
+  const filingId = sub?.filing?.documentId as string | undefined;
+
   const before = Number(sub?.score ?? 0);
   if (before === rounded) {
     if (log) console.log('[scoring] submission no-op (unchanged)', { submissionDocumentId, rounded });
@@ -185,6 +195,19 @@ export async function recomputeSubmissionScore(
     data: { score: rounded },
     status: 'published',
   } as any);
+
+  if (filingId) {
+    await strapi.service('api::realtime-sse.pubsub').publish(
+      `filing:${filingId}`,
+      `filing:submission:score:${filingId}`,
+      'filing:submission:score',
+      {
+        submissionScore: rounded,
+        documentId: submissionDocumentId,
+        at: new Date().toISOString(),
+      }
+    );
+  }
 
   if (log) {
     console.log('[scoring] recompute submission.score', {
@@ -259,6 +282,21 @@ export async function recomputeFilingFinalScore(strapi, filingDocumentId, opts) 
     data: { finalScore: chosen },
     status: 'published',
   } as any);
+
+  if (filing?.filingStatus === 'final' && before !== chosen) {
+    await strapi.service('api::realtime-sse.pubsub').publish(
+      `filing:${filingDocumentId}`,
+      `filing:score:final:${filingDocumentId}`,  // message id
+      'filing:score:final',
+      {
+        finalScore: chosen,
+        documentId: filingDocumentId,
+        components: { model: modelTotal, auditor: auditedPrevTotal },
+        at: new Date().toISOString(),
+      }
+    );
+  }
+
 
   if (log) strapi.log.info(`[scoring.final] before=${before} -> after=${chosen} (model=${modelTotal} auditor=${auditedPrevTotal})`);
 

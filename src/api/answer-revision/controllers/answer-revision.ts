@@ -81,5 +81,95 @@ export default factories.createCoreController(
       const sanitized = await this.sanitizeOutput(rows, ctx);
       return this.transformResponse(sanitized);
     },
+    async update(ctx) {
+      const UID = 'api::answer-revision.answer-revision';
+      const documentId = String(ctx.params.id);
+
+      // 1) Capture "prev" BEFORE the core update (to get relation IDs reliably)
+      let prev: any = null;
+      try {
+        prev = await strapi.documents(UID).findOne({
+          documentId,
+          fields: ['documentId'],
+          populate: {
+            filing:   { fields: ['documentId'] },
+            question: { fields: ['documentId'] },
+          },
+        } as any);
+      } catch { /* ignore */ }
+
+      // 2) Perform the normal update
+      const res = await super.update(ctx);
+
+      // 3) ALWAYS emit only the fields that were actually updated in this request
+      const rawBody = (ctx.request?.body ?? {}) as any;
+      const data = 'data' in rawBody ? rawBody.data : rawBody;
+
+      const ALLOWED = new Set([
+        'answerText',
+        'modelScore',
+        'modelReason',
+        'modelSuggestion',
+        'auditorScore',
+        'auditorReason',
+        'auditorSuggestion',
+      ]);
+
+      const sentKeys = Object.keys(data || {}).filter((k) => ALLOWED.has(k));
+
+      if (sentKeys.length > 0) {
+        // Resolve channel IDs
+        const revisionId = documentId;
+        let filingId     = String(prev?.filing?.documentId ?? '');
+        let questionId   = String(prev?.question?.documentId ?? '');
+
+        if (!filingId || !questionId) {
+          try {
+            const populated: any = await strapi.documents(UID).findOne({
+              documentId,
+              fields: ['documentId'],
+              populate: { filing: true, question: true },
+            } as any);
+            filingId   = filingId   || String(populated?.filing?.documentId   || '');
+            questionId = questionId || String(populated?.question?.documentId || '');
+          } catch { /* ignore */ }
+        }
+
+        if (filingId && questionId) {
+          const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
+          const str = (v: unknown) => (v == null ? null : String(v));
+
+          const payload: any = {
+            documentId: revisionId,
+            updatedAt: new Date().toISOString(),
+          };
+
+          for (const k of sentKeys) {
+            if (k === 'auditorScore' || k === 'modelScore') payload[k] = num(data[k]);
+            else payload[k] = str(data[k]);
+          }
+
+          const topic = `question:${filingId}:${questionId}:${revisionId}`;
+          const event = 'question:answer:state';
+          const msgId = `${event}:${revisionId}:${Date.now()}`;
+
+          try {
+            await strapi.service('api::realtime-sse.pubsub').publish(topic, msgId, event, payload);
+          } catch (err) {
+            strapi.log?.warn?.(`[sse][answer-revision.update] publish failed: ${err?.message ?? err}`);
+          }
+        } else {
+          strapi.log?.warn?.(
+            '[sse][answer-revision.update] missing IDs; skip emit doc=%s filing=%s question=%s',
+            revisionId, filingId, questionId
+          );
+        }
+      }
+
+      // 4) Return the normal response
+      return res;
+    }
+
+
   })
 );

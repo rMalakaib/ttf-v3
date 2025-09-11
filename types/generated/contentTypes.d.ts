@@ -422,7 +422,16 @@ export interface ApiActivityLogActivityLog extends Struct.CollectionTypeSchema {
   };
   attributes: {
     action: Schema.Attribute.Enumeration<
-      ['edit', 'score', 'submit', 'override', 'lock']
+      [
+        'edit',
+        'score',
+        'submit',
+        'override',
+        'lock',
+        'sse_subscribe',
+        'sse_publish',
+        'sse_disconnect',
+      ]
     > &
       Schema.Attribute.Required;
     afterJson: Schema.Attribute.JSON;
@@ -596,6 +605,7 @@ export interface ApiFilingFiling extends Struct.CollectionTypeSchema {
       'api::submission.submission'
     >;
     submissionScore: Schema.Attribute.Decimal;
+    title: Schema.Attribute.String;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
