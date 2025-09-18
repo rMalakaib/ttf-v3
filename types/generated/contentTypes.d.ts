@@ -837,6 +837,7 @@ export interface ApiQuestionQuestion extends Struct.CollectionTypeSchema {
       'oneToMany',
       'api::question-lock.question-lock'
     >;
+    questionType: Schema.Attribute.Enumeration<['text', 'wallet', 'financial']>;
     subheader: Schema.Attribute.String & Schema.Attribute.Required;
     submission_answers: Schema.Attribute.Relation<
       'oneToMany',

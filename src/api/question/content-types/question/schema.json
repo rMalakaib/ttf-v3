@@ -66,6 +66,14 @@
     "subheader": {
       "type": "string",
       "required": true
+    },
+    "questionType": {
+      "type": "enumeration",
+      "enum": [
+        "text",
+        "wallet",
+        "financial"
+      ]
     }
   }
 }
