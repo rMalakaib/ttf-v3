@@ -8,7 +8,7 @@ import { factories } from '@strapi/strapi';
  * (Add 'find' if you ever want GET /projects)
  */
 export default factories.createCoreRouter('api::project.project', {
-  only: ['findOne', 'delete'],
+  only: ['findOne', 'find', 'delete'],
   config: {
     findOne: { policies: ['api::project.require-project-membership'], middlewares: [] },
     delete: { policies: ['api::project.require-project-membership'], middlewares: [] },

@@ -619,6 +619,7 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         'example',
         'guidanceMarkdown',
         'maxScore',
+        'questionType',
       ] as any,
       sort: ['order:asc'],
       populate: [],

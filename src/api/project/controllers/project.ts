@@ -1,5 +1,6 @@
 // path: src/api/project/controllers/project.ts
 import { factories } from '@strapi/strapi';
+import { errors } from '@strapi/utils';
 
 // helper to normalize role
 const roleOf = (user: any): 'admin' | 'auditor' | 'authenticated' => {
@@ -104,6 +105,18 @@ export default factories.createCoreController('api::project.project', ({ strapi 
     return this.transformResponse(sanitized);
   },
 
+  async find(ctx) {
+      const user = ctx.state?.user;
+      if (!user) throw new errors.UnauthorizedError('Login required');
+
+      if (!roleOf(user)) {
+        // short, explicit error; swap for ctx.forbidden(...) if you prefer
+        throw new errors.ForbiddenError('Only admins or auditors may list all projects');
+      }
+
+      // delegate to core logic (respects filters/pagination in ctx.query)
+      return await super.find(ctx);
+    },
   /**
    * GET /projects/:id
    * Fetch a single Project (documentId) for dashboards, without exposing secret keys.

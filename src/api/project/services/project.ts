@@ -175,10 +175,10 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
         const updated = await strapi.service('api::project.project').findOne(projectId, {
             fields: ['slug', 'domain', 'createdAt', 'updatedAt'],
             populate: {
-            users_permissions_users: {
-                fields: ['id', 'username', 'email', 'confirmed', 'blocked'],
-                sort: ['id:asc'],
-            },
+            // users_permissions_users: {
+            //     fields: ['id', 'username', 'email', 'confirmed', 'blocked'],
+            //     sort: ['id:asc'],
+            // },
             },
         });
 

@@ -18,7 +18,7 @@
     "domain": {
       "type": "string",
       "required": true,
-      "unique": true
+      "unique": false
     },
     "secret_keys": {
       "type": "relation",

@@ -51,7 +51,7 @@ export default {
         event.state = event.state || {};
         event.state.prevRoleType = prev?.role?.type ?? null;
 
-        strapi.log.info(`[role-lc] beforeUpdate user=${id} prev=${event.state.prevRoleType}`);
+        
       },
 
       async afterUpdate(event) {
@@ -66,7 +66,7 @@ export default {
         const prevRoleType = event?.state?.prevRoleType ?? null;
         const nextRoleType = next?.role?.type ?? null;
 
-        strapi.log.info(`[role-lc] afterUpdate user=${id} prev=${prevRoleType} next=${nextRoleType}`);
+        
 
         // Only fire when moving FROM authenticated -> something else
         if (prevRoleType === 'authenticated' && nextRoleType && nextRoleType !== 'authenticated') {
@@ -78,7 +78,7 @@ export default {
               'user:role:changed',
               { userId: id, from: 'authenticated', to: nextRoleType, at: new Date().toISOString() }
             );
-            strapi.log.info(`[role-lc] emitted user:role:changed for user=${id}`);
+            
           } catch (e: any) {
             strapi.log.warn(`[role-lc] emit failed for user=${id}: ${e?.message || e}`);
           }
