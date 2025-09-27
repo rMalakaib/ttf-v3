@@ -95,6 +95,7 @@ async stream(ctx: Context) {
     "X-Accel-Buffering": "no",
     "Content-Encoding": "identity",
   });
+  res.write('retry: 15000\n');
   res.flushHeaders?.();
   res.socket?.setNoDelay(true);
   res.socket?.setKeepAlive(true, 60_000);
@@ -127,17 +128,14 @@ async stream(ctx: Context) {
 
   // Keepalive (padded event, not a comment) every 15s
   const hb = setInterval(() => {
-    writeSseEventPadded("heartbeat", { at: new Date().toISOString() }, undefined, 2048);
-  }, 15000);
+  writeSseEventPadded("hb-pad", { _pad: " ".repeat(2048) }, undefined, 2048); // ignored by FE
+  writeSseEventPadded("heartbeat", {}, undefined, 0);                         // FE expects {}
+}, 15000);
 
   // ---- Subscribe ONLY to the user topic
   const topics: string[] = [`user:${Number(user.id)}`];
   const bus: any = strapi.service("api::realtime-sse.pubsub");
   const userId = Number(user.id);
-
-  // 👇 add this (projectId is only for your kicked notice payload; '' is fine)
-  const projectRef = typeof (ctx.query as any)?.projectId === 'string' ? (ctx.query as any).projectId : '';
-  try { bus.disconnectAllForUser(userId, projectRef || ''); } catch {}
 
   // Writer compatible with your original pubsub (topics, write) signature
   const writer = (msg: { id?: string; event: string; data: any }) => {
