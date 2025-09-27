@@ -84,7 +84,7 @@ async stream(ctx: Context) {
   const user = (ctx.state as any)?.user;
   if (!user) return void ctx.unauthorized();
 
-  // Take over at Node level (avoid Koa buffering)
+  // Node-level takeover (avoid Koa buffering)
   ctx.respond = false;
   const res = ctx.res;
 
@@ -99,44 +99,52 @@ async stream(ctx: Context) {
   res.socket?.setNoDelay(true);
   res.socket?.setKeepAlive(true, 60_000);
 
-  // --- Edge flush prelude (~8KB)
-  try {
-    res.write(": " + " ".repeat(8190) + "\n\n");
-  } catch {}
+  // Big prelude so the edge flushes immediately (~8KB)
+  try { res.write(": " + " ".repeat(8190) + "\n\n"); } catch {}
 
-  // Helper to write a padded SSE event to reach a byte floor
-  const writeSseEventPadded = (event: string, data: any, minBytes = 8192) => {
+  // Helper: write a padded SSE event so tiny frames don’t get buffered
+  const writeSseEventPadded = (event: string, data: any, id?: string, minBytes = 2048) => {
     try {
       let payload = JSON.stringify(data ?? {});
-      // compute approximate frame size; add a _pad field if too small
-      const baseLen = (`event: ${event}\n`.length) + ("data: ".length) + payload.length + ("\n\n".length);
+      const baseLen =
+        (id ? `id: ${id}\n`.length : 0) +
+        `event: ${event}\n`.length +
+        "data: ".length +
+        payload.length +
+        "\n\n".length;
       const need = Math.max(0, minBytes - baseLen);
-      if (need > 0) {
-        // add ~need bytes of padding (JSON-safe)
-        payload = payload.replace(/}$/, `,"_pad":"${" ".repeat(need)}"}`);
-      }
+      if (need > 0) payload = payload.replace(/}$/, `,"_pad":"${" ".repeat(need)}"}`);
+
+      if (id) res.write(`id: ${id}\n`);
       res.write(`event: ${event}\n`);
       res.write(`data: ${payload}\n\n`);
     } catch {}
   };
 
-  // Handshake (PADDED so Cloudflare forwards it immediately)
+  // Handshake (padded)
   const subId = randomUUID();
-  writeSseEventPadded("server-handshake", { subId, at: new Date().toISOString() });
+  writeSseEventPadded("server-handshake", { subId, at: new Date().toISOString() }, undefined, 8192);
 
-  // Heartbeat comments to prevent idle close
+  // Keepalive (padded event, not a comment) every 15s
   const hb = setInterval(() => {
-    try {
-      const payload = { at: new Date().toISOString(), _pad: " ".repeat(2048) };
-      res.write("event: keepalive\n");
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
-    } catch {}
+    writeSseEventPadded("keepalive", { at: new Date().toISOString() }, undefined, 2048);
   }, 15000);
 
-  // ---- ONLY USER TOPIC
+  // ---- Subscribe ONLY to the user topic
   const topics: string[] = [`user:${Number(user.id)}`];
+  const bus: any = strapi.service("api::realtime-sse.pubsub");
+  const userId = Number(user.id);
 
-  // Optional guard (timeboxed); warn but DO NOT close on failure
+  // Writer compatible with your original pubsub (topics, write) signature
+  const writer = (msg: { id?: string; event: string; data: any }) => {
+    // pad every published event so proxies forward immediately
+    writeSseEventPadded(msg.event, msg.data, msg.id, 2048);
+  };
+
+  let subscribed = false;
+  let legacySubId: string | undefined;
+
+  // Optional auth (timeboxed). Warn but keep socket open on failure.
   try {
     await withTimeout(
       strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
@@ -144,35 +152,61 @@ async stream(ctx: Context) {
       "guard-timeout"
     );
   } catch (e: any) {
-    writeSseEventPadded("warning", { message: e?.message || "guard-failed" }, 2048);
+    writeSseEventPadded("warning", { message: e?.message || "guard-failed" }, undefined, 2048);
   }
 
-  // Subscribe via your existing pubsub (unchanged), through compat helpers
-  const bus: any = strapi.service("api::realtime-sse.pubsub");
-  const userId = Number(user.id);
-  let subscribed = false;
-
+  // Try your original pubsub shape first: subscribe(topics, write) -> subId
   try {
-    subscribeCompat(bus, res, subId, userId, topics);
-    subscribed = true;
-    writeSseEventPadded("subscribed", { subId, topics, at: new Date().toISOString() }, 2048);
+    if (typeof bus.subscribe === "function") {
+      try {
+        legacySubId = bus.subscribe(topics, writer);
+        if (legacySubId && typeof bus.tagSubscriber === "function") {
+          try { bus.tagSubscriber(legacySubId, userId); } catch {}
+        }
+        if (legacySubId && typeof bus.registerCloser === "function") {
+          try {
+            bus.registerCloser(legacySubId, () => {
+              clearInterval(hb);
+              try { res.end(); } catch {}
+            });
+          } catch {}
+        }
+        subscribed = true;
+      } catch (e) {
+        // fall through to compat variants
+      }
+    }
+
+    // Fallback: use the compat bridge that works with (res,{subId,userId,topics}) etc.
+    if (!subscribed) {
+      subscribeCompat(bus, res, subId, userId, topics);
+      subscribed = true;
+    }
+
+    writeSseEventPadded("subscribed", { subId: legacySubId ?? subId, topics, at: new Date().toISOString() }, undefined, 2048);
   } catch (e: any) {
-    // Keep stream open; avoid client reconnect loop
     writeSseEventPadded("warning", {
       message: "not-subscribed (pubsub signature mismatch)",
       detail: String(e?.message || e),
-    }, 2048);
+    }, undefined, 2048);
+    // Keep the stream open so client doesn’t reconnect storm; keepalives continue
   }
 
   // Cleanup
   ctx.req.on("close", () => {
     clearInterval(hb);
-    if (subscribed) {
-      try { unsubscribeCompat(bus, res, subId); } catch {}
-    }
+    try {
+      if (legacySubId && typeof bus.unsubscribe === "function") {
+        try { bus.unsubscribe(legacySubId); } catch {}
+      } else {
+        // compat variants (by res or by subId)
+        unsubscribeCompat(bus, res, subId);
+      }
+    } catch {}
     try { res.end(); } catch {}
   });
 }
+
 
 ,
 
