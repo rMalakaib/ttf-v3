@@ -126,8 +126,12 @@ async stream(ctx: Context) {
 
   // Heartbeat comments to prevent idle close
   const hb = setInterval(() => {
-    try { res.write(`: ping ${Date.now()}\n\n`); } catch {}
-  }, 15_000);
+    try {
+      const payload = { at: new Date().toISOString(), _pad: " ".repeat(2048) };
+      res.write("event: keepalive\n");
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {}
+  }, 15000);
 
   // ---- ONLY USER TOPIC
   const topics: string[] = [`user:${Number(user.id)}`];
