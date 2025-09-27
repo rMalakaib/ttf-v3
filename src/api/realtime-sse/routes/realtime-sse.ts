@@ -35,6 +35,16 @@ export default {
       policies: [],
     },
   },
+    {
+    method: "GET",
+    path: "/realtime-sse/smoke-pad",
+    handler: "smoke-pad.test",
+    config: {
+      auth: false,   // IMPORTANT: keep this public for the test
+      policies: [],
+    },
+  }
+
 
   ],
 };
