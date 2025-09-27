@@ -22,8 +22,20 @@ export default {
       config: {
         policies: [],                  // or reuse your guard policy if you wired one
         middlewares: [],
-      },
+      },  
+      
     },
+      {
+    method: "GET",
+    path: "/realtime-sse/smoke",
+    handler: "smoke.test",
+    config: {
+      // default is authenticated; set auth:false to make it public if desired
+      // auth: false,
+      policies: [],
+    },
+  },
+
   ],
 };
 // /realtime-sse/stream?projectId=P&filingId=F&questionId=Q&answerRevisionId=
