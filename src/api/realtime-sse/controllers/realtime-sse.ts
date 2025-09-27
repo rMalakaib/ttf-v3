@@ -16,18 +16,51 @@ export default ({ strapi }) => ({
   const user = (ctx.state as any).user;
   if (!user) return void ctx.unauthorized();
 
-  const projectRef = typeof ctx.query.projectId === 'string' && ctx.query.projectId.trim()
-    ? ctx.query.projectId.trim()
-    : undefined;
+  // --- Parse inputs (fast, sync)
+  const projectRef =
+    typeof ctx.query.projectId === 'string' && ctx.query.projectId.trim()
+      ? ctx.query.projectId.trim()
+      : undefined;
 
   const topics = parseTopics(ctx, user.id);
-  await strapi.service('api::realtime-sse.guard').assertCanSubscribe(user, topics, projectRef);
 
-  // Take over the response
+  // --- Take over response + send stream-safe headers *immediately*
   ctx.req.setTimeout(0);
   ctx.respond = false;
-  const res = ctx.res;
 
+  // NOTE: Use text/plain here; Next proxy will re-label to text/event-stream
+  ctx.set('Content-Type', 'text/plain; charset=utf-8');
+  ctx.set('Cache-Control', 'no-cache, no-transform');
+  ctx.set('Connection', 'keep-alive');
+  ctx.set('X-Accel-Buffering', 'no');
+  ctx.set('Content-Encoding', 'identity');
+
+  ctx.status = 200;
+
+  const res = ctx.res;
+  res.flushHeaders?.();                    // flush headers now
+
+  // Tiny pad/comment so strict proxies flush right away (1–2 KB is safe)
+  try { res.write(': ' + ' '.repeat(1024) + '\n'); } catch {}
+
+  // (Optional) minimal open marker
+  try { res.write(`: open ${Date.now()}\n\n`); } catch {}
+
+  // --- AuthZ guard (can be slow in prod)
+  try {
+    await strapi.service('api::realtime-sse.guard')
+      .assertCanSubscribe(user, topics, projectRef);
+  } catch (err: any) {
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: err?.message || 'forbidden' })}\n\n`);
+    } catch {}
+    try { res.end(); } catch {}
+    return;
+  }
+
+  const pubsub = strapi.service('api::realtime-sse.pubsub');
+
+  // Subscribe & attach ownership
   const write = (msg: { id: string; event: string; data: any }) => {
     if (res.writableEnded) return;
     res.write(`id: ${msg.id}\n`);
@@ -35,9 +68,6 @@ export default ({ strapi }) => ({
     res.write(`data: ${JSON.stringify(msg.data)}\n\n`);
   };
 
-  const pubsub = strapi.service('api::realtime-sse.pubsub');
-
-  // Subscribe first so we can expose subId
   const subId = pubsub.subscribe(topics, write);
   pubsub.tagSubscriber(subId, Number(user.id));
   pubsub.registerCloser(subId, () => {
@@ -45,32 +75,22 @@ export default ({ strapi }) => ({
     try { res.end(); } catch {}
   });
 
-  // Set headers *after* we know subId, *before* any writes
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-    'X-SSE-Sub-Id': subId,                // ← expose subId as a header
-  });
-
-  // Priming comment to flush some proxies/clients
-  res.write(':\n\n');
-
-  // Emit "open" with subId so the client can store it
+  // Handshake (put subId in event instead of a header)
   write({
     id: String(Date.now()),
     event: 'system:ready',
-    data: { subId, topics, at: new Date().toISOString() },  // ← include subId here
+    data: { subId, topics, at: new Date().toISOString() },
   });
 
+  // Heartbeat
   const hb = setInterval(() => {
-    if (!res.writableEnded) res.write(`event: heartbeat\ndata: {}\n\n`);
+    if (!res.writableEnded) res.write(`: ping ${Date.now()}\n\n`);
   }, 15000);
 
-  ctx.req.on('close', async () => {
+  // Cleanup
+  ctx.req.on('close', () => {
     clearInterval(hb);
-    strapi.service('api::realtime-sse.pubsub').unsubscribe(subId);
+    try { strapi.service('api::realtime-sse.pubsub').unsubscribe(subId); } catch {}
     try { res.end(); } catch {}
   });
 },

@@ -23,26 +23,6 @@ export default {
         policies: [],                  // or reuse your guard policy if you wired one
         middlewares: [],
       },  
-      
-    },
-      {
-    method: "GET",
-    path: "/realtime-sse/smoke",
-    handler: "smoke.test",
-    config: {
-      // default is authenticated; set auth:false to make it public if desired
-      // auth: false,
-      policies: [],
-    },
-  },
-    {
-    method: "GET",
-    path: "/realtime-sse/smoke-pad",
-    handler: "smoke-pad.test",
-    config: {
-      auth: false,   // IMPORTANT: keep this public for the test
-      policies: [],
-    },
   },
     {
     method: "GET",
