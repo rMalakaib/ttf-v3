@@ -84,30 +84,39 @@ async stream(ctx: Context) {
   const user = (ctx.state as any)?.user;
   if (!user) return void ctx.unauthorized();
 
-  // --- Take over response immediately (prod-safe)
-  ctx.set("Content-Type", "text/event-stream; charset=utf-8");
-  ctx.set("Cache-Control", "no-cache, no-transform");
-  ctx.set("Connection", "keep-alive");
-  ctx.set("X-Accel-Buffering", "no");
-  ctx.set("Content-Encoding", "identity");
-  ctx.status = 200;
+  // Take over immediately
   ctx.respond = false;
-
   const res = ctx.res;
-  res.flushHeaders?.();
 
-  // Force edge flush (Cloudflare/DO) with padding
-  try { res.write(": " + " ".repeat(PAD_BYTES) + "\n"); } catch {}
+  // ⚠️ Write headers directly via Node to avoid any Koa buffering issues
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Content-Encoding": "identity",
+  });
+
+  // Force a flush at the edge with a BIG prelude (~64KB)
+  // Many proxies won’t forward tiny SSE frames; this defeats buffering.
+  try {
+    const padChunk = ": " + " ".repeat(8190) + "\n\n"; // ~8KB per chunk
+    for (let i = 0; i < 8; i++) res.write(padChunk);   // ~64KB total
+  } catch {}
 
   // Handshake + heartbeat BEFORE any awaits
   const subId = randomUUID();
   writeSseEvent(res, "server-handshake", { subId, at: new Date().toISOString() });
-  const hb = setInterval(() => writeComment(res, `ping ${Date.now()}`), 15000);
+
+  const hb = setInterval(() => {
+    // comment lines are safe and ignored by clients
+    try { res.write(`: ping ${Date.now()}\n\n`); } catch {}
+  }, 15000);
 
   // Only the user topic
   const topics: string[] = [`user:${Number(user.id)}`];
 
-  // Guard (kept, but timeboxed)
+  // Guard (timeboxed). If it fails, WARN but don’t close (avoid reconnect storms).
   try {
     await withTimeout(
       strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
@@ -115,12 +124,10 @@ async stream(ctx: Context) {
       "guard-timeout"
     );
   } catch (e: any) {
-    // Warn but KEEP the stream open to avoid reconnect loop
     writeSseEvent(res, "warning", { message: e?.message || "guard-failed" });
-    // Do not end; heartbeats keep the socket alive for debugging
   }
 
-  // Try to subscribe using your existing pubsub (no changes there)
+  // Subscribe using your existing pubsub (unchanged) via compat bridge
   const bus: any = strapi.service("api::realtime-sse.pubsub");
   const userId = Number(user.id);
   let subscribed = false;
@@ -130,14 +137,14 @@ async stream(ctx: Context) {
     subscribed = true;
     writeSseEvent(res, "subscribed", { subId, topics, at: new Date().toISOString() });
   } catch (e: any) {
-    // Don’t close—announce degraded mode and keep alive (prevents client retries)
+    // Keep stream alive; client won’t auto-reconnect
     writeSseEvent(res, "warning", {
       message: "not-subscribed (pubsub signature mismatch)",
       detail: String(e?.message || e),
     });
   }
 
-  // Cleanup on disconnect
+  // Cleanup
   ctx.req.on("close", () => {
     clearInterval(hb);
     if (subscribed) {
@@ -145,7 +152,8 @@ async stream(ctx: Context) {
     }
     try { res.end(); } catch {}
   });
-},
+}
+,
 
 
 
