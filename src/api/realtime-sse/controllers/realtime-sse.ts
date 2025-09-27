@@ -123,7 +123,7 @@ async stream(ctx: Context) {
 
   // Handshake (padded)
   const subId = randomUUID();
-  writeSseEventPadded("system", { subId, topics: user.id,  at: new Date().toISOString() }, undefined, 2048);
+  // writeSseEventPadded("system", { subId, topics: user.id,  at: new Date().toISOString() }, undefined, 2048);
 
   // Keepalive (padded event, not a comment) every 15s
   const hb = setInterval(() => {
