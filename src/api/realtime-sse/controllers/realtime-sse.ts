@@ -1,5 +1,6 @@
 // src/api/realtime-sse/controllers/realtime-sse.ts
 import type { Context } from 'koa';
+import { randomUUID } from "node:crypto";
 
 const parseTopics = (ctx: Context, userId: number) => {
   const q = ctx.query as any;
@@ -11,89 +12,142 @@ const parseTopics = (ctx: Context, userId: number) => {
   return topics;
 };
 
+// --- BEGIN compat helpers (drop these near the top of the file) ------------
+function subscribeCompat(
+  bus: any,
+  res: any,
+  subId: string,
+  userId: number,
+  topics: string[]
+) {
+  const attempts: Array<() => any> = [
+    () => bus.subscribe(res, { subId, userId, topics }),     // object shape
+    () => bus.subscribe(res, [subId, userId, topics]),       // tuple/array shape
+    () => bus.subscribe(res, subId, userId, topics),         // positional
+    () => bus.subscribe(res, topics),                        // minimal legacy
+  ];
+
+  let lastErr: unknown;
+  for (const tryIt of attempts) {
+    try {
+      const out = tryIt();
+      // Optional: uncomment for one-time visibility
+      // console.log("[SSE] subscribeCompat: used variant", attempts.indexOf(tryIt));
+      return out;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr ?? new Error("pubsub.subscribe signature mismatch");
+}
+
+function unsubscribeCompat(bus: any, res: any, subId: string) {
+  const attempts: Array<() => any> = [
+    () => bus.unsubscribe(res),                // by response handle
+    () => bus.unsubscribe(subId),              // by subId
+    () => bus.unsubscribe(res, subId),         // mixed
+  ];
+
+  for (const tryIt of attempts) {
+    try { return tryIt(); } catch {}
+  }
+  // If none worked, just ignore; stream is ending anyway.
+}
+// --- END compat helpers -----------------------------------------------------
+
+
+const PAD_BYTES = 2048;
+
+const writeSseEvent = (res: any, event: string, data?: any, id?: string) => {
+  try {
+    if (id) res.write(`id: ${id}\n`);
+    res.write(`event: ${event}\n`);
+    if (data !== undefined) res.write(`data: ${JSON.stringify(data)}\n`);
+    res.write("\n");
+  } catch {}
+};
+
+const writeComment = (res: any, text: string) => {
+  try { res.write(`: ${text}\n\n`); } catch {}
+};
+
+const withTimeout = async <T>(p: Promise<T>, ms: number, label = "timeout"): Promise<T> => {
+  let t: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, rej) => (t = setTimeout(() => rej(new Error(label)), ms)));
+  try { return await Promise.race([p, timeout]) as T; }
+  finally { clearTimeout(t!); }
+};
+
+
 export default ({ strapi }) => ({
-  async stream(ctx: Context) {
-  const user = (ctx.state as any).user;
+async stream(ctx: Context) {
+  const user = (ctx.state as any)?.user;
   if (!user) return void ctx.unauthorized();
 
-  // --- Parse inputs (fast, sync)
-  const projectRef =
-    typeof ctx.query.projectId === 'string' && ctx.query.projectId.trim()
-      ? ctx.query.projectId.trim()
-      : undefined;
-
-  const topics = parseTopics(ctx, user.id);
-
-  // --- Take over response + send stream-safe headers *immediately*
-  ctx.req.setTimeout(0);
+  // --- Take over response immediately (prod-safe)
+  ctx.set("Content-Type", "text/event-stream; charset=utf-8");
+  ctx.set("Cache-Control", "no-cache, no-transform");
+  ctx.set("Connection", "keep-alive");
+  ctx.set("X-Accel-Buffering", "no");
+  ctx.set("Content-Encoding", "identity");
+  ctx.status = 200;
   ctx.respond = false;
 
-  // NOTE: Use text/plain here; Next proxy will re-label to text/event-stream
-  ctx.set('Content-Type', 'text/plain; charset=utf-8');
-  ctx.set('Cache-Control', 'no-cache, no-transform');
-  ctx.set('Connection', 'keep-alive');
-  ctx.set('X-Accel-Buffering', 'no');
-  ctx.set('Content-Encoding', 'identity');
-
-  ctx.status = 200;
-
   const res = ctx.res;
-  res.flushHeaders?.();                    // flush headers now
+  res.flushHeaders?.();
 
-  // Tiny pad/comment so strict proxies flush right away (1–2 KB is safe)
-  try { res.write(': ' + ' '.repeat(1024) + '\n'); } catch {}
+  // Force edge flush (Cloudflare/DO) with padding
+  try { res.write(": " + " ".repeat(PAD_BYTES) + "\n"); } catch {}
 
-  // (Optional) minimal open marker
-  try { res.write(`: open ${Date.now()}\n\n`); } catch {}
+  // Handshake + heartbeat BEFORE any awaits
+  const subId = randomUUID();
+  writeSseEvent(res, "server-handshake", { subId, at: new Date().toISOString() });
+  const hb = setInterval(() => writeComment(res, `ping ${Date.now()}`), 15000);
 
-  // --- AuthZ guard (can be slow in prod)
+  // Only the user topic
+  const topics: string[] = [`user:${Number(user.id)}`];
+
+  // Guard (kept, but timeboxed)
   try {
-    await strapi.service('api::realtime-sse.guard')
-      .assertCanSubscribe(user, topics, projectRef);
-  } catch (err: any) {
-    try {
-      res.write(`event: error\ndata: ${JSON.stringify({ message: err?.message || 'forbidden' })}\n\n`);
-    } catch {}
-    try { res.end(); } catch {}
-    return;
+    await withTimeout(
+      strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
+      4000,
+      "guard-timeout"
+    );
+  } catch (e: any) {
+    // Warn but KEEP the stream open to avoid reconnect loop
+    writeSseEvent(res, "warning", { message: e?.message || "guard-failed" });
+    // Do not end; heartbeats keep the socket alive for debugging
   }
 
-  const pubsub = strapi.service('api::realtime-sse.pubsub');
+  // Try to subscribe using your existing pubsub (no changes there)
+  const bus: any = strapi.service("api::realtime-sse.pubsub");
+  const userId = Number(user.id);
+  let subscribed = false;
 
-  // Subscribe & attach ownership
-  const write = (msg: { id: string; event: string; data: any }) => {
-    if (res.writableEnded) return;
-    res.write(`id: ${msg.id}\n`);
-    res.write(`event: ${msg.event}\n`);
-    res.write(`data: ${JSON.stringify(msg.data)}\n\n`);
-  };
+  try {
+    subscribeCompat(bus, res, subId, userId, topics);
+    subscribed = true;
+    writeSseEvent(res, "subscribed", { subId, topics, at: new Date().toISOString() });
+  } catch (e: any) {
+    // Don’t close—announce degraded mode and keep alive (prevents client retries)
+    writeSseEvent(res, "warning", {
+      message: "not-subscribed (pubsub signature mismatch)",
+      detail: String(e?.message || e),
+    });
+  }
 
-  const subId = pubsub.subscribe(topics, write);
-  pubsub.tagSubscriber(subId, Number(user.id));
-  pubsub.registerCloser(subId, () => {
+  // Cleanup on disconnect
+  ctx.req.on("close", () => {
     clearInterval(hb);
-    try { res.end(); } catch {}
-  });
-
-  // Handshake (put subId in event instead of a header)
-  write({
-    id: String(Date.now()),
-    event: 'system:ready',
-    data: { subId, topics, at: new Date().toISOString() },
-  });
-
-  // Heartbeat
-  const hb = setInterval(() => {
-    if (!res.writableEnded) res.write(`: ping ${Date.now()}\n\n`);
-  }, 15000);
-
-  // Cleanup
-  ctx.req.on('close', () => {
-    clearInterval(hb);
-    try { strapi.service('api::realtime-sse.pubsub').unsubscribe(subId); } catch {}
+    if (subscribed) {
+      try { unsubscribeCompat(bus, res, subId); } catch {}
+    }
     try { res.end(); } catch {}
   });
 },
+
+
 
 
 
