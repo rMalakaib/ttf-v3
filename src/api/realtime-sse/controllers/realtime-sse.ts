@@ -123,7 +123,8 @@ async stream(ctx: Context) {
 
   // Handshake (padded)
   const subId = randomUUID();
-  writeSseEventPadded("system:ready", { subId, topics: [`user:${Number(user.id)}`],  at: new Date().toISOString() }, undefined, 2048);
+  writeSseEventPadded("server-handshake", { at: new Date().toISOString() }, undefined, 8192);
+
 
   // Keepalive (padded event, not a comment) every 15s
   const hb = setInterval(() => {
@@ -183,7 +184,15 @@ async stream(ctx: Context) {
       subscribed = true;
     }
 
-    writeSseEventPadded("subscribed", { subId: legacySubId ?? subId, topics, at: new Date().toISOString() }, undefined, 2048);
+    const effectiveSubId = legacySubId ?? subId;          // <- the id pubsub recognizes
+      try { bus.tagSubscriber?.(effectiveSubId, userId); } catch {}   // ensure ownership
+      writeSseEventPadded(
+        "system:ready",
+        { subId: effectiveSubId, topics, at: new Date().toISOString() },
+        undefined,
+        2048
+      );
+
   } catch (e: any) {
     writeSseEventPadded("warning", {
       message: "not-subscribed (pubsub signature mismatch)",
