@@ -43,6 +43,12 @@ export default {
       auth: false,   // IMPORTANT: keep this public for the test
       policies: [],
     },
+  },
+    {
+    method: "GET",
+    path: "/realtime-sse/chunk-probe",
+    handler: "chunk-probe.test",
+    config: { auth: false, policies: [] },
   }
 
 
