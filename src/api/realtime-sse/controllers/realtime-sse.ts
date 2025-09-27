@@ -84,9 +84,64 @@ async stream(ctx: Context) {
   const user = (ctx.state as any)?.user;
   if (!user) return void ctx.unauthorized();
 
-  // Node-level takeover (avoid Koa buffering)
-  ctx.respond = false;
+  // Build topics: only user:<id> (matches your screenshot/FE)
+  const topics: string[] = [`user:${Number(user.id)}`];
+
+  // Optional projectRef preserved (guard’s 3rd arg)
+  const q: any = ctx.query || {};
+  const projectRef =
+    typeof q.projectId === "string" && q.projectId.trim() ? q.projectId.trim() : undefined;
+
+  // ---- AUTH/GUARD (timeboxed, before any writes)
+  try {
+    await withTimeout(
+      strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics, projectRef),
+      4000,
+      "guard-timeout"
+    );
+  } catch (e: any) {
+    return void ctx.forbidden(e?.message || "not authorized");
+  }
+
+  // ---- PUBSUB SUBSCRIBE (writer-first, like your original)
+  const bus: any = strapi.service("api::realtime-sse.pubsub");
+
   const res = ctx.res;
+  const writer = (msg: { id?: string; event: string; data: any }) => {
+    if (res.writableEnded) return;
+    // EXACT shape expected by FE; no padding added here
+    if (msg.id) res.write(`id: ${msg.id}\n`);
+    res.write(`event: ${msg.event}\n`);
+    res.write(`data: ${JSON.stringify(msg.data)}\n\n`);
+  };
+
+  let subId: string | undefined;
+  let usedWriter = false;
+
+  try {
+    // Your original signature: subscribe(topics, write) -> subId
+    subId = bus.subscribe(topics, writer);
+    usedWriter = true;
+
+    // Keep your original tagging/closer behavior
+    try { bus.tagSubscriber?.(subId, Number(user.id)); } catch {}
+    try {
+      bus.registerCloser?.(subId, () => {
+        clearInterval(hb);
+        try { res.end(); } catch {}
+      });
+    } catch {}
+  } catch {
+    // Fallback to compat (res-based). Still works, but events may be tiny.
+    subId = subId || crypto.randomUUID?.() || String(Date.now());
+    try { subscribeCompat(bus, res, subId!, Number(user.id), topics); } catch (err) {
+      return void ctx.throw(500, `subscribe failed: ${String((err as any)?.message || err)}`);
+    }
+  }
+
+  // ---- TAKE OVER THE RESPONSE (Node-level headers), after we have subId
+  ctx.req.setTimeout?.(0);
+  ctx.respond = false;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -94,118 +149,49 @@ async stream(ctx: Context) {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
     "Content-Encoding": "identity",
+    "X-SSE-Sub-Id": String(subId),
   });
   res.flushHeaders?.();
   res.socket?.setNoDelay(true);
   res.socket?.setKeepAlive(true, 60_000);
 
-  // Big prelude so the edge flushes immediately (~8KB)
-  try { res.write(": " + " ".repeat(8190) + "\n\n"); } catch {}
+  // Large prelude to force edge flush (Cloudflare/DO)
+  try { res.write(`: ${" ".repeat(8190)}\n\n`); } catch {}
 
-  // Helper: write a padded SSE event so tiny frames don’t get buffered
-  const writeSseEventPadded = (event: string, data: any, id?: string, minBytes = 2048) => {
-    try {
-      let payload = JSON.stringify(data ?? {});
-      const baseLen =
-        (id ? `id: ${id}\n`.length : 0) +
-        `event: ${event}\n`.length +
-        "data: ".length +
-        payload.length +
-        "\n\n".length;
-      const need = Math.max(0, minBytes - baseLen);
-      if (need > 0) payload = payload.replace(/}$/, `,"_pad":"${" ".repeat(need)}"}`);
+  // ---- INITIAL EVENT (what your FE expects)
+  writer({
+    id: String(Date.now()),
+    event: "system:ready",
+    data: { subId, topics, at: new Date().toISOString() },
+  });
 
-      if (id) res.write(`id: ${id}\n`);
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${payload}\n\n`);
-    } catch {}
-  };
-
-  // Handshake (padded)
-  const subId = randomUUID();
-  writeSseEventPadded("system:ready", { subId, topics: user.id,  at: new Date().toISOString() }, undefined, 2048);
-
-  // Keepalive (padded event, not a comment) every 15s
+  // ---- HEARTBEAT (FE expects `heartbeat {}` exactly)
+  // To keep proxies happy while preserving the exact payload,
+  // we precede it with a small padding-only event the FE can ignore.
   const hb = setInterval(() => {
-    writeSseEventPadded("heartbeat", { at: new Date().toISOString() }, undefined, 2048);
+    if (res.writableEnded) return;
+    // padding frame (ignored by FE)
+    res.write(`event: hb-pad\ndata: {"_pad":"${" ".repeat(1024)}"}\n\n`);
+    // exact heartbeat shape
+    res.write(`event: heartbeat\ndata: {}\n\n`);
   }, 15000);
 
-  // ---- Subscribe ONLY to the user topic
-  const topics: string[] = [`user:${Number(user.id)}`];
-  const bus: any = strapi.service("api::realtime-sse.pubsub");
-  const userId = Number(user.id);
-
-  // Writer compatible with your original pubsub (topics, write) signature
-  const writer = (msg: { id?: string; event: string; data: any }) => {
-    // pad every published event so proxies forward immediately
-    writeSseEventPadded(msg.event, msg.data, msg.id, 2048);
-  };
-
-  let subscribed = false;
-  let legacySubId: string | undefined;
-
-  // Optional auth (timeboxed). Warn but keep socket open on failure.
-  try {
-    await withTimeout(
-      strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
-      4000,
-      "guard-timeout"
-    );
-  } catch (e: any) {
-    writeSseEventPadded("warning", { message: e?.message || "guard-failed" }, undefined, 2048);
-  }
-
-  // Try your original pubsub shape first: subscribe(topics, write) -> subId
-  try {
-    if (typeof bus.subscribe === "function") {
-      try {
-        legacySubId = bus.subscribe(topics, writer);
-        if (legacySubId && typeof bus.tagSubscriber === "function") {
-          try { bus.tagSubscriber(legacySubId, userId); } catch {}
-        }
-        if (legacySubId && typeof bus.registerCloser === "function") {
-          try {
-            bus.registerCloser(legacySubId, () => {
-              clearInterval(hb);
-              try { res.end(); } catch {}
-            });
-          } catch {}
-        }
-        subscribed = true;
-      } catch (e) {
-        // fall through to compat variants
-      }
-    }
-
-    // Fallback: use the compat bridge that works with (res,{subId,userId,topics}) etc.
-    if (!subscribed) {
-      subscribeCompat(bus, res, subId, userId, topics);
-      subscribed = true;
-    }
-
-    writeSseEventPadded("subscribed", { subId: legacySubId ?? subId, topics, at: new Date().toISOString() }, undefined, 2048);
-  } catch (e: any) {
-    writeSseEventPadded("warning", {
-      message: "not-subscribed (pubsub signature mismatch)",
-      detail: String(e?.message || e),
-    }, undefined, 2048);
-    // Keep the stream open so client doesn’t reconnect storm; keepalives continue
-  }
-
-  // Cleanup
+  // ---- CLEANUP
   ctx.req.on("close", () => {
     clearInterval(hb);
     try {
-      if (legacySubId && typeof bus.unsubscribe === "function") {
-        try { bus.unsubscribe(legacySubId); } catch {}
+      if (usedWriter && subId) {
+        // your original unsubscribe(subId)
+        bus.unsubscribe?.(subId);
       } else {
-        // compat variants (by res or by subId)
-        unsubscribeCompat(bus, res, subId);
+        // compat variants (by res/subId)
+        unsubscribeCompat(bus, res, String(subId));
       }
     } catch {}
     try { res.end(); } catch {}
   });
 }
+
 
 
 ,
