@@ -84,11 +84,10 @@ async stream(ctx: Context) {
   const user = (ctx.state as any)?.user;
   if (!user) return void ctx.unauthorized();
 
-  // Take over immediately
+  // Take over at Node level (avoid Koa buffering)
   ctx.respond = false;
   const res = ctx.res;
 
-  // ⚠️ Write headers directly via Node to avoid any Koa buffering issues
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -96,27 +95,44 @@ async stream(ctx: Context) {
     "X-Accel-Buffering": "no",
     "Content-Encoding": "identity",
   });
+  res.flushHeaders?.();
+  res.socket?.setNoDelay(true);
+  res.socket?.setKeepAlive(true, 60_000);
 
-  // Force a flush at the edge with a BIG prelude (~64KB)
-  // Many proxies won’t forward tiny SSE frames; this defeats buffering.
+  // --- Edge flush prelude (~8KB)
   try {
-    const padChunk = ": " + " ".repeat(8190) + "\n\n"; // ~8KB per chunk
-    for (let i = 0; i < 8; i++) res.write(padChunk);   // ~64KB total
+    res.write(": " + " ".repeat(8190) + "\n\n");
   } catch {}
 
-  // Handshake + heartbeat BEFORE any awaits
+  // Helper to write a padded SSE event to reach a byte floor
+  const writeSseEventPadded = (event: string, data: any, minBytes = 8192) => {
+    try {
+      let payload = JSON.stringify(data ?? {});
+      // compute approximate frame size; add a _pad field if too small
+      const baseLen = (`event: ${event}\n`.length) + ("data: ".length) + payload.length + ("\n\n".length);
+      const need = Math.max(0, minBytes - baseLen);
+      if (need > 0) {
+        // add ~need bytes of padding (JSON-safe)
+        payload = payload.replace(/}$/, `,"_pad":"${" ".repeat(need)}"}`);
+      }
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${payload}\n\n`);
+    } catch {}
+  };
+
+  // Handshake (PADDED so Cloudflare forwards it immediately)
   const subId = randomUUID();
-  writeSseEvent(res, "server-handshake", { subId, at: new Date().toISOString() });
+  writeSseEventPadded("server-handshake", { subId, at: new Date().toISOString() });
 
+  // Heartbeat comments to prevent idle close
   const hb = setInterval(() => {
-    // comment lines are safe and ignored by clients
     try { res.write(`: ping ${Date.now()}\n\n`); } catch {}
-  }, 15000);
+  }, 15_000);
 
-  // Only the user topic
+  // ---- ONLY USER TOPIC
   const topics: string[] = [`user:${Number(user.id)}`];
 
-  // Guard (timeboxed). If it fails, WARN but don’t close (avoid reconnect storms).
+  // Optional guard (timeboxed); warn but DO NOT close on failure
   try {
     await withTimeout(
       strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
@@ -124,10 +140,10 @@ async stream(ctx: Context) {
       "guard-timeout"
     );
   } catch (e: any) {
-    writeSseEvent(res, "warning", { message: e?.message || "guard-failed" });
+    writeSseEventPadded("warning", { message: e?.message || "guard-failed" }, 2048);
   }
 
-  // Subscribe using your existing pubsub (unchanged) via compat bridge
+  // Subscribe via your existing pubsub (unchanged), through compat helpers
   const bus: any = strapi.service("api::realtime-sse.pubsub");
   const userId = Number(user.id);
   let subscribed = false;
@@ -135,13 +151,13 @@ async stream(ctx: Context) {
   try {
     subscribeCompat(bus, res, subId, userId, topics);
     subscribed = true;
-    writeSseEvent(res, "subscribed", { subId, topics, at: new Date().toISOString() });
+    writeSseEventPadded("subscribed", { subId, topics, at: new Date().toISOString() }, 2048);
   } catch (e: any) {
-    // Keep stream alive; client won’t auto-reconnect
-    writeSseEvent(res, "warning", {
+    // Keep stream open; avoid client reconnect loop
+    writeSseEventPadded("warning", {
       message: "not-subscribed (pubsub signature mismatch)",
       detail: String(e?.message || e),
-    });
+    }, 2048);
   }
 
   // Cleanup
@@ -153,6 +169,7 @@ async stream(ctx: Context) {
     try { res.end(); } catch {}
   });
 }
+
 ,
 
 
