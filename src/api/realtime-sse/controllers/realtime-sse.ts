@@ -135,6 +135,10 @@ async stream(ctx: Context) {
   const bus: any = strapi.service("api::realtime-sse.pubsub");
   const userId = Number(user.id);
 
+  // 👇 add this (projectId is only for your kicked notice payload; '' is fine)
+  const projectRef = typeof (ctx.query as any)?.projectId === 'string' ? (ctx.query as any).projectId : '';
+  try { bus.disconnectAllForUser(userId, projectRef || ''); } catch {}
+
   // Writer compatible with your original pubsub (topics, write) signature
   const writer = (msg: { id?: string; event: string; data: any }) => {
     // pad every published event so proxies forward immediately
