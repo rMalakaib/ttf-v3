@@ -21,29 +21,35 @@ export default factories.createCoreController('api::project.project', ({ strapi 
    */
   // src/api/project/controllers/project.ts
   async create(ctx) {
-  const user = ctx.state.user;
-  if (!user) return ctx.unauthorized('Login required');
+    const user = ctx.state.user;
+    if (!user) return ctx.unauthorized('Login required');
 
-  const body = (ctx.request.body || {}) as any;
-  const { domain, slug, valueHash } = body;
+    const body = (ctx.request.body || {}) as any;
+    const { domain, slug, valueHash } = body;
 
-  if (!domain) return ctx.badRequest('Missing "domain".');
-  if (!valueHash || typeof valueHash !== 'string') {
-    return ctx.badRequest('Missing "valueHash" (sha256 hex).');
-  }
+    if (!domain) return ctx.badRequest('Missing "domain".');
+    if (!valueHash || typeof valueHash !== 'string') {
+      return ctx.badRequest('Missing "valueHash" (sha256 hex).');
+    }
 
-  // Only slug + domain at creation
-  const data = await this.sanitizeInput({ domain, slug }, ctx);
+    // ⬇️ Normalize slug: trim + lowercase (empty → undefined)
+    const normalizedSlug =
+      typeof slug === 'string'
+        ? slug.trim().toLowerCase() || undefined
+        : undefined;
 
-  const entity = await strapi.service('api::project.project').createWithInitialKey({
-    data,
-    ownerUserId: user.id,
-    valueHash,
-  });
+    // Only slug + domain at creation
+    const data = await this.sanitizeInput({ domain, slug: normalizedSlug }, ctx);
 
-  const sanitized = await this.sanitizeOutput(entity, ctx);
-  return this.transformResponse(sanitized);
-},
+    const entity = await strapi.service('api::project.project').createWithInitialKey({
+      data,
+      ownerUserId: user.id,
+      valueHash,
+    });
+
+    const sanitized = await this.sanitizeOutput(entity, ctx);
+    return this.transformResponse(sanitized);
+  },
 
   /**
    * POST /projects/join
@@ -58,18 +64,21 @@ export default factories.createCoreController('api::project.project', ({ strapi 
     const user = ctx.state.user;
     if (!user) return ctx.unauthorized('Login required');
 
-    const { projectId, valueHash } = (ctx.request.body || {}) as any;
-    if (!projectId || !valueHash) {
-      return ctx.badRequest('Required: { "projectId": "<docId>", "valueHash": "<sha256 hex>" }');
+    const body = ctx.request.body ?? {};
+    const projectRef = String(body.projectRef ?? body.projectId ?? '').trim().toLowerCase(); // <- accept docId OR slug
+    const valueHash  = String(body.valueHash ?? '').trim();
+
+    if (!projectRef || !valueHash) {
+      return ctx.badRequest('Required: { "projectRef" (or "projectId"), "valueHash" }');
     }
-    if (!/^[0-9a-f]{64}$/i.test(String(valueHash))) {
+    if (!/^[0-9a-f]{64}$/i.test(valueHash)) {
       return ctx.badRequest('valueHash must be a 64-char sha256 hex string');
     }
 
     try {
       const entity = await strapi
         .service('api::project.project')
-        .joinByKeyHash({ projectId, valueHash, userId: user.id });
+        .joinByKeyHash({ projectRef, valueHash, userId: Number(user.id) }); // <- pass "projectRef"
 
       const sanitized = await this.sanitizeOutput(entity, ctx);
       return this.transformResponse(sanitized);
@@ -109,7 +118,7 @@ export default factories.createCoreController('api::project.project', ({ strapi 
       const user = ctx.state?.user;
       if (!user) throw new errors.UnauthorizedError('Login required');
 
-      if (!roleOf(user)) {
+      if (roleOf(user) === "authenticated") {
         // short, explicit error; swap for ctx.forbidden(...) if you prefer
         throw new errors.ForbiddenError('Only admins or auditors may list all projects');
       }

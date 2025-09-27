@@ -111,79 +111,66 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
    *  - If the user is already a member, return the project unchanged (idempotent).
    */
    async joinByKeyHash({
-        projectId,
+        projectRef,         // ← renamed from projectId for clarity (can be docId OR slug)
         valueHash,
         userId,
         }: {
-        projectId: string;   // project documentId
-        valueHash: string;   // sha256 hex of the shared secret (server NEVER sees plaintext)
+        projectRef: string;
+        valueHash: string;  // sha256 hex
         userId: number;
         }) {
-        if (!projectId || typeof projectId !== 'string') {
+        if (!projectRef || typeof projectRef !== 'string') {
             throw new NotFoundError('Project not found');
         }
         if (!valueHash || typeof valueHash !== 'string' || !/^[0-9a-f]{64}$/i.test(valueHash)) {
             throw new ForbiddenError('Missing or invalid key hash');
         }
 
-            // 1) Revoke any expired keys first (keeps "active" set clean)
-        await strapi.service('api::secret-key.secret-key').revokeExpiredForProject(projectId);
-
-        // 2) Verify there exists an ACTIVE key with this exact hash
-        const matches = await strapi.documents('api::secret-key.secret-key').findMany({
-            filters: {
-            project: { documentId: projectId },
-            keyState: 'active',
-            valueHash, // exact match required
-            },
-            fields: ['id'],
-            populate: [],
+        // 1) Resolve by documentId or slug
+        let project = await strapi.documents('api::project.project').findFirst({
+            filters: { documentId: projectRef },
+            populate: { users_permissions_users: { fields: ['id'] } },
         });
-        if (!Array.isArray(matches) || matches.length === 0) {
-            throw new ForbiddenError('Invalid or expired project key');
+        if (!project) {
+            project = await strapi.documents('api::project.project').findFirst({
+            filters: { slug: projectRef },
+            populate: { users_permissions_users: { fields: ['id'] } },
+            });
         }
-
-        // 3) Load project with members to check idempotency
-        const project = await strapi.service('api::project.project').findOne(projectId, {
-            fields: ['slug', 'domain', 'createdAt', 'updatedAt'],
-            populate: {
-            users_permissions_users: { fields: ['id'] },
-            },
-        });
         if (!project) throw new NotFoundError('Project not found');
 
+        const docId = String(project.documentId);
+
+        // 2) Revoke expired keys, then verify an ACTIVE key with this exact valueHash exists
+        await strapi.service('api::secret-key.secret-key').revokeExpiredForProject(docId);
+
+        const activeKeyCount = await strapi.documents('api::secret-key.secret-key').count({
+            filters: { project: { documentId: docId }, keyState: 'active', valueHash },
+        });
+        if (activeKeyCount < 1) throw new ForbiddenError('Invalid or expired project key');
+
+        // 3) Idempotent membership add
         const currentMembers: number[] = Array.isArray((project as any).users_permissions_users)
             ? (project as any).users_permissions_users.map((u: any) => Number(u.id))
             : [];
 
-        if (currentMembers.includes(Number(userId))) {
-            // already a member → return as-is (published state unchanged)
-            return project;
+        if (!currentMembers.includes(Number(userId))) {
+            const nextMembers = Array.from(new Set([...currentMembers, Number(userId)])).map(id => ({ id }));
+            await strapi.documents('api::project.project').update({
+            documentId: docId,
+            data: { users_permissions_users: { set: nextMembers } },
+            });
+            await strapi.documents('api::project.project').publish({ documentId: docId });
         }
 
-        // 4) Append caller; use `set` to write a deduped list
-        const nextMembers = Array.from(new Set([...currentMembers, Number(userId)])).map(id => ({ id }));
-        await strapi.documents('api::project.project').update({
-            documentId: projectId,
-            data: { users_permissions_users: { set: nextMembers } },
+        // 4) Return fresh snapshot (omit 'fields' so documentId is present if you need it)
+        const updated = await strapi.documents('api::project.project').findFirst({
+            filters: { documentId: docId },
+            fields: ['slug', 'domain', 'createdAt', 'updatedAt'], // real attributes only (TS-friendly)
         });
 
-        // 5) Publish so the change is live (avoid "Modified" state)
-        await strapi.documents('api::project.project').publish({ documentId: projectId });
-
-        // 6) Return the published document (include members for the dashboard)
-        const updated = await strapi.service('api::project.project').findOne(projectId, {
-            fields: ['slug', 'domain', 'createdAt', 'updatedAt'],
-            populate: {
-            // users_permissions_users: {
-            //     fields: ['id', 'username', 'email', 'confirmed', 'blocked'],
-            //     sort: ['id:asc'],
-            // },
-            },
-        });
-
-     return updated;
-},
+        return updated;
+        },
 
   /**
    * List projects where this user is a member.
@@ -257,7 +244,7 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
         }: {
         projectId: string;
         publicationState?: 'live' | 'preview';
-        }): Promise<string[]> {
+        }): Promise<Array<{ documentId: string; status: string; title: string | null }>> {
         // 404 if the project doesn't exist
         const exists = await strapi.documents('api::project.project').findOne({
             documentId: projectId,
@@ -270,13 +257,17 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
             publicationState,
             filters: { project: { documentId: projectId } },
             sort: ['createdAt:desc'],
-            pagination: { pageSize: 1000 }, // adjust if you expect more; or add pagination passthrough
-            fields: ['id'], // minimal; documentId is always present on the returned items
+            pagination: { pageSize: 1000 },
+            fields: ['filingStatus', 'title'] as any, // documentId is implicit on Documents API
             populate: [],
         });
 
-        return (rows || []).map(r => String((r as any).documentId));
-},
+        return (rows || []).map((r: any) => ({
+            documentId: String(r.documentId),
+            status: String(r.filingStatus),
+            title: r.title ?? null,
+        }));},
+        
     async removeMembers({
         projectDocumentId,
         targetUserIds,
@@ -362,11 +353,30 @@ export default factories.createCoreService('api::project.project', ({ strapi }) 
     // --- SSE: kick removed users off all live streams ---
         try {
         const sseBus = strapi.service('api::realtime-sse.pubsub');
+
         for (const uid of targetUserIds) {
-            sseBus.disconnectAllForUser(Number(uid));
+            // 1) tell their user channel what happened (client can clean up UI)
+            await sseBus.publish(
+            [`user:${Number(uid)}`],                // topics
+            'project:membership:removed',           // event name
+            {
+                projectDocumentId,                    // 👈 include the project docId
+                removedUserId: Number(uid),
+                actorUserId,
+                actorRole,
+                reason: reason ?? (isSelfOnly ? 'self-remove' : 'admin-remove'),
+                at: new Date().toISOString(),
+            }
+            );
+
+            // 2) then forcibly disconnect all their live SSE streams
+            sseBus.disconnectAllForUser(Number(uid), projectDocumentId);
         }
         } catch (e: any) {
-        strapi.log?.warn?.('[project.removeMembers] SSE disconnectAllForUser failed: %s', e?.message ?? e);
+        strapi.log?.warn?.(
+            '[project.removeMembers] SSE notify/disconnect failed: %s',
+            e?.message ?? e
+        );
         }
 
 

@@ -201,7 +201,7 @@ export default ({ strapi }) => ({
   },
 
   // 🔹 NEW: disconnect ALL live SSE subs owned by a user
-  disconnectAllForUser(userId: number) {
+  disconnectAllForUser(userId: number, projectId: string) {
     const ids = userIndex.get(userId);
     if (!ids?.size) return 0;
 
@@ -214,7 +214,7 @@ export default ({ strapi }) => ({
           id: randomUUID(),
           topic: 'system',
           event: 'system:kicked',
-          data: { reason: 'permission-change', userId },
+          data: { projectId: projectId, reason: 'permission-change', userId },
         });
       } catch {}
     }

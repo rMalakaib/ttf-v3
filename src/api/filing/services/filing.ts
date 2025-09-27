@@ -599,7 +599,7 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
         `project:${projectDocumentId}`,
         `project:filing:created:${filingId}`,
         'project:filing:created',
-        { documentId: filingId, title: title, status: status, at: new Date().toISOString() }
+        { projectId: projectDocumentId, documentId: filingId, title: title, status: status, at: new Date().toISOString() }
       );
     } catch (err) {
       // Non-fatal: creation succeeded; if publish/logging fails we just continue.

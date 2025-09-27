@@ -60,7 +60,7 @@ export default ({ strapi }) => ({
   // Emit "open" with subId so the client can store it
   write({
     id: String(Date.now()),
-    event: 'open',
+    event: 'system:ready',
     data: { subId, topics, at: new Date().toISOString() },  // ← include subId here
   });
 

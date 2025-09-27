@@ -17,6 +17,17 @@ const generateSecretAndHash = () => {
   return { secret, valueHash };
 };
 
+const toHash = (maybeSecretOrHash?: string): string => {
+  const s = (maybeSecretOrHash ?? "").trim();
+  const isHex64 = /^[0-9a-f]{64}$/i.test(s);
+  if (!s) {
+    // generate secret, but never expose it; only return its hash
+    const secret = crypto.randomBytes(32).toString("base64url");
+    return crypto.createHash("sha256").update(secret).digest("hex");
+  }
+  return isHex64 ? s : crypto.createHash("sha256").update(s).digest("hex");
+};
+
 export default factories.createCoreService('api::secret-key.secret-key', ({ strapi }) => ({
 
   // Minimal existence check — no more 'secret_key' populate
@@ -102,59 +113,70 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
     };
   },
 
-  // Rotate by revoking ANY existing active keys for the project, then creating one fresh active key or using the valuehash that was passed
-  async rotateForProject(projectId: string, valueHash?: string, ttlMinutes?: number) {
-    const project = await this.ensureProject(projectId);
-    if (!project) throw new NotFoundError('Project not found');
+// Rotate by revoking ANY existing active keys for the project, then creating one fresh active key
+// or using the provided valueHash/plaintext secret (always stored/emitted as hash).
+async rotateForProject(projectId: string, valueHashOrSecret?: string, ttlMinutes?: number) {
+  const project = await this.ensureProject(projectId);
+  if (!project) throw new NotFoundError('Project not found');
 
-    // Revoke expired, then revoke all current actives (ensures only one active key exists)
-    await this.revokeExpiredForProject(projectId);
-    const actives = await strapi.documents('api::secret-key.secret-key').findMany({
-      filters: { project: { documentId: projectId }, keyState: 'active' },
-      fields: ['id'], populate: [],
-    });
-    if (actives.length) {
-      await Promise.all(
-        actives.map(k =>
-          strapi.documents('api::secret-key.secret-key').update({
-            documentId: k.documentId as string,
-            data: { keyState: 'revoked', revokedAt: nowISO() },
-          }),
-        ),
-      );
-    }
+  // Revoke expired, then revoke all current actives (ensures only one active key exists)
+  await this.revokeExpiredForProject(projectId);
 
-    let secret: string | undefined;
-    let hash = valueHash?.trim();
-    if (!hash) { const g = generateSecretAndHash(); secret = g.secret; hash = g.valueHash; }
+  // IMPORTANT: omit `fields` so we get `documentId` back for updates
+  const actives = await strapi.documents('api::secret-key.secret-key').findMany({
+    filters: { project: { documentId: projectId }, keyState: 'active' },
+    populate: [],
+  });
 
-    const ttl = Math.max(1, Number(ttlMinutes ?? TTL_MINUTES));
-    const expires = expiresAtISO(ttl);
-
-    const newKey = await strapi.documents('api::secret-key.secret-key').create({
-      data: { valueHash: hash, keyState: 'active', expiresAt: expires, project: projectId },
-    });
-
-    // --- ADD THIS: emit 'secret-key:rotated' (no secrets in payload) ---
-    // THIS IS A CRITICAL VULNERABILITY PASSING THE NON HASHED NON SALTED SECRET  
-    strapi.service('api::realtime-sse.pubsub').publish(
-      `project:${projectId}`,
-      `project:secret-key:rotated${projectId}`,
-      'project:secret-key:rotated',
-      { secretKey: secret, documentId: projectId, at: new Date().toISOString() }
+  if (actives.length) {
+    await Promise.all(
+      actives.map(k =>
+        strapi.documents('api::secret-key.secret-key').update({
+          documentId: (k as any).documentId, // requires documentId present
+          data: { keyState: 'revoked', revokedAt: nowISO() },
+        }),
+      ),
     );
-    // -------------------------------------------------------------------
+  }
 
-    const payload: any = {
-      id: newKey.documentId,
-      keyState: newKey.keyState,
-      revokedAt: (newKey as any).revokedAt ?? null,
-      expiresAt: (newKey as any).expiresAt ?? expires,
-      createdAt: (newKey as any).createdAt,
-      updatedAt: (newKey as any).updatedAt,
-    };
-    if (secret) payload.secret = secret; // only when server generated it
-    return payload;
-  },
+  const hash = toHash(valueHashOrSecret);
+  const ttl = Math.max(1, Number(ttlMinutes ?? TTL_MINUTES));
+  const expires = expiresAtISO(ttl);
+
+  const newKey = await strapi.documents('api::secret-key.secret-key').create({
+    data: { valueHash: hash, keyState: 'active', expiresAt: expires, project: projectId },
+  });
+
+  const secretId = newKey.documentId;
+
+  // Emit only hashed value; never the plaintext
+  // channel/topic stays project-scoped; event key now uses the SECRET id
+  strapi.service('api::realtime-sse.pubsub').publish(
+    `project:${projectId}`,
+    `project:secret-key:rotated:${secretId}`,
+    'project:secret-key:rotated',
+    {
+      secretId,            // the secret's documentId (requested)
+      projectId,           // still useful for clients
+      valueHash: hash,
+      expiresAt: expires,
+      at: new Date().toISOString(),
+    }
+  );
+
+  // Return only non-sensitive data + hash
+  return {
+    id: secretId,
+    projectId,
+    valueHash: hash,
+    keyState: newKey.keyState,
+    revokedAt: (newKey as any).revokedAt ?? null,
+    expiresAt: (newKey as any).expiresAt ?? expires,
+    createdAt: (newKey as any).createdAt,
+    updatedAt: (newKey as any).updatedAt,
+  };
+}
+
+
 
 }));
