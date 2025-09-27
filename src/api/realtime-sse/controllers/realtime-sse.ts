@@ -123,11 +123,11 @@ async stream(ctx: Context) {
 
   // Handshake (padded)
   const subId = randomUUID();
-  writeSseEventPadded("server-handshake", { subId, at: new Date().toISOString() }, undefined, 8192);
+  writeSseEventPadded("system:ready", { subId, topics: user.id,  at: new Date().toISOString() }, undefined, 2048);
 
   // Keepalive (padded event, not a comment) every 15s
   const hb = setInterval(() => {
-    writeSseEventPadded("keepalive", { at: new Date().toISOString() }, undefined, 2048);
+    writeSseEventPadded("heartbeat", { at: new Date().toISOString() }, undefined, 2048);
   }, 15000);
 
   // ---- Subscribe ONLY to the user topic
