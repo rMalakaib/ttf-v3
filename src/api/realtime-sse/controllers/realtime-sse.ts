@@ -57,7 +57,7 @@ function unsubscribeCompat(bus: any, res: any, subId: string) {
 // --- END compat helpers -----------------------------------------------------
 
 
-const PAD_BYTES = 8192;
+const PAD_BYTES = 100;
 
 const writeSseEvent = (res: any, event: string, data?: any, id?: string) => {
   try {
@@ -82,137 +82,67 @@ const withTimeout = async <T>(p: Promise<T>, ms: number, label = "timeout"): Pro
 
 export default ({ strapi }) => ({
 async stream(ctx: Context) {
-  const user = (ctx.state as any)?.user;
+  const user = (ctx.state as any).user;
   if (!user) return void ctx.unauthorized();
 
-  // Node-level takeover (avoid Koa buffering)
+  const projectRef = typeof ctx.query.projectId === 'string' && ctx.query.projectId.trim()
+    ? ctx.query.projectId.trim()
+    : undefined;
+
+  const topics = parseTopics(ctx, user.id);
+  await strapi.service('api::realtime-sse.guard').assertCanSubscribe(user, topics, projectRef);
+
+  // Take over the response
+  ctx.req.setTimeout(0);
   ctx.respond = false;
   const res = ctx.res;
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-    "Content-Encoding": "identity",
-  });
-  
-  res.flushHeaders?.();
-  res.socket?.setNoDelay(true);
-  res.socket?.setKeepAlive(true, 60_000);
-
-  // Big prelude so the edge flushes immediately (~8KB)
-  try { res.write(": " + " ".repeat(8190) + "\n\n"); } catch {}
-
-  // Helper: write a padded SSE event so tiny frames don’t get buffered
-  const PAD_MIN = Number(process.env.SSE_PAD_MIN ?? 8192); // ← was 2048
-
-  const writeSseEventPadded = (event: string, data: any, id?: string, minBytes = PAD_MIN) => {
-    try {
-      let payload = JSON.stringify(data ?? {});
-      const baseLen =
-        (id ? `id: ${id}\n`.length : 0) +
-        `event: ${event}\n`.length +
-        "data: ".length +
-        payload.length +
-        "\n\n".length;
-      const need = Math.max(0, minBytes - baseLen);
-      if (need > 0) payload = payload.replace(/}$/, `,"_pad":"${" 1".repeat(need)}"}`);
-
-      if (id) res.write(`id: ${id}\n`);
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${payload}\n\n`);
-    } catch {}
+  const write = (msg: { id: string; event: string; data: any }) => {
+    if (res.writableEnded) return;
+    res.write(`id: ${msg.id}\n`);
+    res.write(`event: ${msg.event}\n`);
+    res.write(`data: ${JSON.stringify(msg.data)}\n\n`);
   };
 
-  // Handshake (padded)
-  const subId = randomUUID();
-  // writeSseEventPadded("system", { subId, topics: user.id,  at: new Date().toISOString() }, undefined, 2048);
+  const pubsub = strapi.service('api::realtime-sse.pubsub');
 
-  // Keepalive (padded event, not a comment) every 15s
-  const hb = setInterval(() => {
-    writeSseEventPadded("heartbeat", { at: new Date().toISOString() }, undefined, 2048);
-  }, 15000);
-
-  // ---- Subscribe ONLY to the user topic
-  const topics: string[] = [`user:${Number(user.id)}`];
-  const bus: any = strapi.service("api::realtime-sse.pubsub");
-  const userId = Number(user.id);
-
-  // Writer compatible with your original pubsub (topics, write) signature
-  const writer = (msg: { id?: string; event: string; data: any }) => {
-    // pad every published event so proxies forward immediately
-    writeSseEventPadded(msg.event, msg.data, msg.id, 2048);
-  };
-
-  let subscribed = false;
-  let legacySubId: string | undefined;
-
-  // Optional auth (timeboxed). Warn but keep socket open on failure.
-  try {
-    await withTimeout(
-      strapi.service("api::realtime-sse.guard").assertCanSubscribe(user, topics),
-      4000,
-      "guard-timeout"
-    );
-  } catch (e: any) {
-    writeSseEventPadded("warning", { message: e?.message || "guard-failed" }, undefined, 2048);
-  }
-
-  // Try your original pubsub shape first: subscribe(topics, write) -> subId
-  try {
-    if (typeof bus.subscribe === "function") {
-      try {
-        legacySubId = bus.subscribe(topics, writer);
-        if (legacySubId && typeof bus.tagSubscriber === "function") {
-          try { bus.tagSubscriber(legacySubId, userId); } catch {}
-        }
-        if (legacySubId && typeof bus.registerCloser === "function") {
-          try {
-            bus.registerCloser(legacySubId, () => {
-              clearInterval(hb);
-              try { res.end(); } catch {}
-            });
-          } catch {}
-        }
-        subscribed = true;
-      } catch (e) {
-        // fall through to compat variants
-      }
-    }
-
-    // Fallback: use the compat bridge that works with (res,{subId,userId,topics}) etc.
-    if (!subscribed) {
-      subscribeCompat(bus, res, subId, userId, topics);
-      subscribed = true;
-    }
-
-    writeSseEventPadded("system:ready", { subId: legacySubId ?? subId, topics, at: new Date().toISOString() }, undefined, 2048);
-  } catch (e: any) {
-    writeSseEventPadded("warning", {
-      message: "not-subscribed (pubsub signature mismatch)",
-      detail: String(e?.message || e),
-    }, undefined, 2048);
-    // Keep the stream open so client doesn’t reconnect storm; keepalives continue
-  }
-
-  // Cleanup
-  ctx.req.on("close", () => {
+  // Subscribe first so we can expose subId
+  const subId = pubsub.subscribe(topics, write);
+  pubsub.tagSubscriber(subId, Number(user.id));
+  pubsub.registerCloser(subId, () => {
     clearInterval(hb);
-    try {
-      if (legacySubId && typeof bus.unsubscribe === "function") {
-        try { bus.unsubscribe(legacySubId); } catch {}
-      } else {
-        // compat variants (by res or by subId)
-        unsubscribeCompat(bus, res, subId);
-      }
-    } catch {}
     try { res.end(); } catch {}
   });
-}
 
+  // Set headers *after* we know subId, *before* any writes
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'X-SSE-Sub-Id': subId,                // ← expose subId as a header
+  });
 
-,
+  // Priming comment to flush some proxies/clients
+  res.write(':\n\n');
+
+  // Emit "open" with subId so the client can store it
+  write({
+    id: String(Date.now()),
+    event: 'system:ready',
+    data: { subId, topics, at: new Date().toISOString() },  // ← include subId here
+  });
+
+  const hb = setInterval(() => {
+    if (!res.writableEnded) res.write(`event: heartbeat\ndata: {1111111111111111111111111}\n\n`);
+  }, 15000);
+
+  ctx.req.on('close', async () => {
+    clearInterval(hb);
+    strapi.service('api::realtime-sse.pubsub').unsubscribe(subId);
+    try { res.end(); } catch {}
+  });
+},
 
 
 
