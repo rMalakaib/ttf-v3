@@ -12,6 +12,7 @@ const parseTopics = (ctx: Context, userId: number) => {
   return topics;
 };
 
+
 // --- BEGIN compat helpers (drop these near the top of the file) ------------
 function subscribeCompat(
   bus: any,
@@ -56,7 +57,7 @@ function unsubscribeCompat(bus: any, res: any, subId: string) {
 // --- END compat helpers -----------------------------------------------------
 
 
-const PAD_BYTES = 2048;
+const PAD_BYTES = 8192;
 
 const writeSseEvent = (res: any, event: string, data?: any, id?: string) => {
   try {
@@ -104,7 +105,9 @@ async stream(ctx: Context) {
   try { res.write(": " + " ".repeat(8190) + "\n\n"); } catch {}
 
   // Helper: write a padded SSE event so tiny frames don’t get buffered
-  const writeSseEventPadded = (event: string, data: any, id?: string, minBytes = 2048) => {
+  const PAD_MIN = Number(process.env.SSE_PAD_MIN ?? 8192); // ← was 2048
+
+  const writeSseEventPadded = (event: string, data: any, id?: string, minBytes = PAD_MIN) => {
     try {
       let payload = JSON.stringify(data ?? {});
       const baseLen =
