@@ -117,7 +117,7 @@ async stream(ctx: Context) {
         payload.length +
         "\n\n".length;
       const need = Math.max(0, minBytes - baseLen);
-      if (need > 0) payload = payload.replace(/}$/, `,"_pad":"${" ".repeat(need)}"}`);
+      if (need > 0) payload = payload.replace(/}$/, `,"_pad":"${" 1".repeat(need)}"}`);
 
       if (id) res.write(`id: ${id}\n`);
       res.write(`event: ${event}\n`);
