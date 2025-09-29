@@ -10,6 +10,12 @@ const roleOf = (user: any): 'admin' | 'auditor' | 'authenticated' => {
   return 'authenticated';
 };
 
+const normalizeSlug = (slug?: string) =>
+  typeof slug === 'string' ? slug.trim().toLowerCase() || undefined : undefined;
+
+// letters, numbers, hyphens, 3–64 chars
+const SLUG_RE = /^[a-z0-9-]{3,64}$/;
+
 export default factories.createCoreController('api::project.project', ({ strapi }) => ({
   /**
    * POST /projects/create
@@ -214,5 +220,205 @@ export default factories.createCoreController('api::project.project', ({ strapi 
     });
 
     ctx.body = { ok: true, removed: result.removedUserIds, project: result.project };
-  }
+  },
+
+  /**
+   * PATCH /projects/:projectId/rename
+   * Body: { slug: string }
+   *
+   * Renames a Project by updating its slug.
+   * Auth required; membership enforced by route policy.
+   */
+  async rename(ctx) {
+    const user = ctx.state?.user;
+    if (!user) throw new errors.UnauthorizedError('Login required');
+
+    const { projectId } = ctx.params;
+    if (!projectId) return ctx.badRequest('Missing "projectId"');
+
+    const body = (ctx.request.body || {}) as any;
+    const wantedSlug = normalizeSlug(body.slug);
+
+    if (!wantedSlug) return ctx.badRequest('Missing "slug" in body');
+    if (!SLUG_RE.test(wantedSlug)) {
+      return ctx.badRequest('Invalid slug (use 3–64 chars: a–z, 0–9, hyphen)');
+    }
+
+    // Verify project exists
+    const existing = await strapi
+      .documents('api::project.project')
+      .findOne({ documentId: String(projectId), populate: [] });
+    if (!existing) return ctx.notFound('Project not found');
+
+    // Idempotent: nothing to do
+    if (existing.slug === wantedSlug) {
+      const sanitized = await this.sanitizeOutput(existing, ctx);
+      return this.transformResponse(sanitized);
+    }
+
+    // Uniqueness check (exclude current project)
+    const conflict = await strapi.documents('api::project.project').findFirst({
+      filters: { slug: wantedSlug, documentId: { $ne: String(projectId) } },
+      fields: ['id', 'slug'],
+      populate: [],
+      publicationState: 'live',
+    });
+    if (conflict) return ctx.conflict('Slug already in use');
+
+    // (Optional) role gating beyond membership policy, if you want:
+    // const actorRole = roleOf(user);
+    // if (actorRole === 'authenticated') { /* enforce owner-only, etc. */ }
+
+    const updated = await strapi.documents('api::project.project').update({
+      documentId: String(projectId),
+      data: { slug: wantedSlug },
+      status: 'published',
+    });
+
+    const sanitized = await this.sanitizeOutput(updated, ctx);
+    return this.transformResponse(sanitized);
+  },
+
+   /**
+   * DELETE /projects/:id
+   * Deep-deletes a project:
+   *   1) deletes all secret-keys for the project
+   *   2) deletes all filings for the project (reusing filing.controller.delete for full cascade)
+   *   3) deletes the project itself
+   * Sends SSE events and prunes channels where sensible.
+   */
+  async delete(ctx) {
+    const projectDocumentId = String(ctx.params?.id ?? '');
+    if (!projectDocumentId) return ctx.badRequest('Missing project documentId');
+
+    // ---- fetch the project (to 404 early & for SSE) ----
+    const existing = await strapi.documents('api::project.project').findOne({
+      documentId: projectDocumentId,
+      // keep lean; we only need the id/slug if you want to broadcast
+      fields: ['id', 'slug'],
+    }) as any;
+
+    if (!existing) return ctx.notFound('Project not found');
+
+    // Small helper: generic paged delete by filters
+    const deleteAll = async (uid: string, filters: any, pageSize = 100) => {
+      let total = 0;
+      for (;;) {
+        const rows = await (strapi.documents as any)(uid).findMany({
+          filters,
+          page: 1,
+          pageSize,
+          // keep it lean
+          fields: ['documentId', 'id'],
+          populate: [],
+        }) as any[];
+        if (!rows?.length) break;
+
+        for (const row of rows) {
+          const docId = row?.documentId ?? row?.id;
+          if (docId) {
+            await (strapi.documents as any)(uid).delete({ documentId: String(docId) });
+            total++;
+          }
+        }
+      }
+      return total;
+    };
+
+    // Helper: call filing.controller.delete for full cascade (so we reuse your existing logic)
+    const deleteFilingDeep = async (filingDocumentId: string) => {
+      try {
+        // Build a minimal synthetic ctx for the filing controller
+        const filingController = strapi.controller('api::filing.filing') as any;
+        const childCtx = {
+          // carry auth & state through so policies still apply
+          state: ctx.state,
+          params: { id: filingDocumentId },
+          // provide the minimal API used by your filing controller
+          badRequest: (m: string) => { throw new Error(`400 ${m}`); },
+          notFound: (m: string) => { throw new Error(`404 ${m}`); },
+          forbidden: (m: string) => { throw new Error(`403 ${m}`); },
+          conflict: (m: string) => { throw new Error(`409 ${m}`); },
+          // not used by delete, but keep shape consistent
+          query: {},
+          request: { body: {} },
+          // these two are used by sanitize/transform on success paths in some controllers
+          async sanitizeOutput(v: any) { return v; },
+          transformResponse(v: any) { return v; },
+          // logging passthrough (optional)
+          
+        };
+
+        // Invoke your existing cascade delete
+        await filingController.delete.call(filingController, childCtx);
+      } catch (e) {
+        // Log and continue (best-effort per-filing)
+        strapi.log?.warn?.(`[project.delete] filing ${filingDocumentId} delete failed: ${e instanceof Error ? e.message : e}`);
+      }
+    };
+
+    // ---- 1) Delete all secret-keys for this project (no cascade needed) ----
+    try {
+      await deleteAll('api::secret-key.secret-key', {
+        project: { documentId: projectDocumentId },
+      });
+    } catch (e) {
+      strapi.log?.warn?.(`[project.delete] secret-key purge failed (continuing): ${e instanceof Error ? e.message : e}`);
+    }
+
+    // ---- 2) Find all filings for this project and delete each via filing controller cascade ----
+    try {
+      const filings = await (strapi.documents as any)('api::filing.filing').findMany({
+        filters: { project: { documentId: projectDocumentId } },
+        page: 1,
+        pageSize: 500, // bump if needed; the loop inside filing.delete also pages children
+        fields: ['documentId'],
+        populate: [],
+      }) as Array<{ documentId: string }>;
+
+      for (const f of (filings || [])) {
+        if (f?.documentId) await deleteFilingDeep(f.documentId);
+      }
+    } catch (e) {
+      strapi.log?.warn?.(
+        `[project.delete] fetching/deleting filings failed (continuing): ${e instanceof Error ? e.message : e}`
+      );
+    }
+
+    // ---- 3) Delete the project itself ----
+    const deleted = await strapi.documents('api::project.project').delete({
+      documentId: projectDocumentId,
+    });
+    if (!deleted) return ctx.notFound('Project not found (already removed)');
+
+    // ---- 4) Publish SSE + prune project channels ----
+    try {
+      const pubsub: any = strapi.service('api::realtime-sse.pubsub');
+      const payload = {
+        projectId: projectDocumentId,
+        slug: existing?.slug ?? null,
+        at: new Date().toISOString(),
+      };
+
+      pubsub?.publish?.(`project:${projectDocumentId}`, 'project:deleted', payload);
+
+      // If your pubsub has helpers; otherwise noop safety
+      if (typeof pubsub.disconnectTopic === 'function') {
+        pubsub.disconnectTopic(`project:${projectDocumentId}`);
+      }
+      if (typeof pubsub.disconnectTopicPrefix === 'function') {
+        // optionally force-drop any project-scoped topics your frontend might subscribe to
+        pubsub.disconnectTopicPrefix(`filing:`); // filings were already removed; safe if no-op
+      }
+    } catch (err) {
+      strapi.log?.warn?.(
+        `[project.delete] publish/disconnect failed: ${err instanceof Error ? err.message : err}`
+      );
+    }
+
+    // mirror your other controllers: return the deleted entity payload
+    return deleted;
+  },
+
+
 }));

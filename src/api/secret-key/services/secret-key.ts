@@ -81,7 +81,7 @@ export default factories.createCoreService('api::secret-key.secret-key', ({ stra
     return strapi.documents('api::secret-key.secret-key').findMany({
       filters: { project: { documentId: projectId }, keyState: 'active' },
       sort: ['createdAt:desc'],
-      fields: ['id', 'keyState', 'revokedAt', 'expiresAt', 'createdAt', 'updatedAt'],
+      fields: ['id', 'valueHash','keyState', 'revokedAt', 'expiresAt', 'createdAt', 'updatedAt'],
       populate: [],
     });
   },
@@ -127,17 +127,6 @@ async rotateForProject(projectId: string, valueHashOrSecret?: string, ttlMinutes
     filters: { project: { documentId: projectId }, keyState: 'active' },
     populate: [],
   });
-
-  if (actives.length) {
-    await Promise.all(
-      actives.map(k =>
-        strapi.documents('api::secret-key.secret-key').update({
-          documentId: (k as any).documentId, // requires documentId present
-          data: { keyState: 'revoked', revokedAt: nowISO() },
-        }),
-      ),
-    );
-  }
 
   const hash = toHash(valueHashOrSecret);
   const ttl = Math.max(1, Number(ttlMinutes ?? TTL_MINUTES));

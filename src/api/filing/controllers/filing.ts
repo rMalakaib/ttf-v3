@@ -262,4 +262,68 @@ export default factories.createCoreController('api::filing.filing', ({ strapi })
 
     return deleted;
   },
+
+    /**
+   * PATCH /projects/:projectId/filings/:id/rename
+   * Body or query may include: { title: string }
+   * Only updates the 'title' field — no status/slug changes.
+   */
+  async rename(ctx) {
+    const projectId = String(ctx.params?.projectId ?? '');
+    const filingDocumentId = String(ctx.params?.id ?? '');
+
+    if (!projectId) return ctx.badRequest('Missing projectId');
+    if (!filingDocumentId) return ctx.badRequest('Missing filing documentId');
+
+    const q = ctx.query as any;
+    const body = (ctx.request?.body ?? {}) as Record<string, unknown>;
+
+    // Accept title from body or query; sanitize and bound length
+    const rawTitle = (body.title ?? q?.title);
+    const title = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+
+    if (!title) return ctx.badRequest('Title must be a non-empty string');
+    if (title.length > 160) return ctx.badRequest('Title too long (max 160 chars)');
+
+    // Ensure the filing belongs to the given project (defense-in-depth)
+    const existing = await strapi.documents('api::filing.filing').findOne({
+      documentId: filingDocumentId,
+      populate: { project: true },
+    }) as any;
+
+    if (!existing) return ctx.notFound('Filing not found');
+    if (existing?.project?.documentId !== projectId) {
+      return ctx.forbidden('Filing does not belong to this project');
+    }
+
+    // No-op if unchanged (cheap guard)
+    if ((existing.title ?? '') === title) {
+      const sanitized = await this.sanitizeOutput(existing, ctx);
+      return this.transformResponse(sanitized);
+    }
+
+    // Update just the title
+    const updated = await strapi.documents('api::filing.filing').update({
+      documentId: filingDocumentId,
+      data: { title },
+    });
+
+    // Fire SSE hints (optional but handy for your caches)
+    try {
+      const pubsub: any = strapi.service('api::realtime-sse.pubsub');
+      const payload = {
+        filingId: filingDocumentId,
+        projectId,
+        title,
+        at: new Date().toISOString(),
+      };
+      pubsub?.publish?.(`filing:${filingDocumentId}`, 'filing:renamed', payload);
+      pubsub?.publish?.(`project:${projectId}`, 'filing:renamed', payload);
+    } catch (e) {
+      strapi.log?.debug?.(`[filing.rename] SSE publish failed: ${e instanceof Error ? e.message : e}`);
+    }
+
+    const sanitized = await this.sanitizeOutput(updated, ctx);
+    return this.transformResponse(sanitized);
+  },
 }));

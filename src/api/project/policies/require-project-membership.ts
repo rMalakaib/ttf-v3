@@ -20,13 +20,11 @@ const logPolicy = async (strapi: any, {
     await strapi.documents('api::activity-log.activity-log').create({
       status: 'published',
       data: {
-        action: 'edit',                 // using existing enum; “policy decision” audit
+        action: 'edit',
         entityType: 'policy:project.require-project-membership',
         entityId: String(entityId ?? slug ?? ''),
         beforeJson: { url, method, userId, role, entityId, slug },
         afterJson:  { allow, reason, memberCount },
-        // If you want to relate the user, uncomment the connect line below (works in v5):
-        // users_permissions_user: { connect: [Number(userId)] },
       },
     });
   } catch (e: any) {
@@ -60,9 +58,20 @@ export default async (policyContext: any, _config: any, { strapi }: any) => {
     return true;
   }
 
-  // ----- resolve project by documentId or slug (works for :projectId, :id, or body)
-  const documentId = p.projectId ?? p.documentId ?? p.id ?? body?.documentId ?? null;
-  const slug       = p.slug ?? body?.slug ?? null;
+  // ----- resolve project by documentId or slug
+  // NOTE: Do NOT read slug from body — body.slug may be a *new* slug (e.g., rename)
+  let documentId: string | null =
+    (p.projectId ?? p.documentId ?? p.id ?? body?.documentId ?? null) &&
+    String(p.projectId ?? p.documentId ?? p.id ?? body?.documentId);
+
+  const slug: string | null = p.slug ?? null;
+
+  // Fallback: extract projectId from URL for custom routes like /api/projects/:projectId/rename
+  // This handles cases where policyContext.params is empty for PUT/PATCH on custom routes.
+  if (!documentId && !slug) {
+    const m = url.match(/\/api\/projects\/([^/]+)\/rename(?:\/)?$/);
+    if (m && m[1]) documentId = m[1];
+  }
 
   if (!documentId && !slug) {
     await logPolicy(strapi, { url, method, userId: user.id, role, allow: false, reason: 'missing project identifier' });
@@ -76,7 +85,6 @@ export default async (policyContext: any, _config: any, { strapi }: any) => {
 
   const memberCount = await strapi.documents('api::project.project').count({ filters });
 
-  // log the decision
   const allow = memberCount > 0;
   await logPolicy(strapi, {
     url, method, userId: user.id, role,
