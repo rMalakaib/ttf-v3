@@ -27,16 +27,15 @@ type GetClientFilesArgs = {
   filingDocumentId: string;
 };
 
-/**
- * Minimal Upload file shape used by the frontend
- */
-type MinimalFile = {
-  id: string;
+export type MinimalFile = {
+  id: number;              // numeric Upload file id (e.g., 217)
+  documentId: string;      // stable documentId (e.g., "ue4ys9j5...")
   url: string;
   name: string;
   mime: string;
   size: number;
-  thumbUrl?: string;
+  // optional: thumbnail if you want it later
+  thumbnailUrl?: string | null;
 };
 
 
@@ -869,61 +868,50 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
    * null if no client-document exists for the filing.
    */
   async getClientDocumentFilesMinimal(
-    args: GetClientFilesArgs
-  ): Promise<{ clientDocumentId: string; files: MinimalFile[] } | null> {
-    const { filingDocumentId } = args;
+  args: GetClientFilesArgs
+): Promise<{ clientDocumentId: string; files: MinimalFile[] } | null> {
+  const { filingDocumentId } = args;
 
-    // Find the client-document for this filing; populate the 'document' media
-    const clientDocs = await (strapi.documents as any)(
-      'api::client-document.client-document'
-    ).findMany({
-      filters: { filing: { documentId: filingDocumentId } },
-      page: 1,
-      pageSize: 1,
-      populate: {
-        document: {
-          fields: [
-            'id',
-            'documentId',
-            'url',
-            'name',
-            'mime',
-            'size',
-            'formats', // for thumbnail (if image)
-          ],
-        },
+  const clientDocs = await (strapi.documents as any)(
+    'api::client-document.client-document'
+  ).findMany({
+    filters: { filing: { documentId: filingDocumentId } },
+    page: 1,
+    pageSize: 1,
+    populate: {
+      document: {
+        // IMPORTANT: keep both id and documentId
+        fields: ['id', 'documentId', 'url', 'name', 'mime', 'size', 'formats'],
       },
-    }) as any[];
+    },
+  }) as any[];
 
-    if (!clientDocs?.length) return null;
+  const cd = Array.isArray(clientDocs) && clientDocs.length ? clientDocs[0] : null;
+  if (!cd) return null;
 
-    const clientDoc = clientDocs[0];
-    const clientDocumentId: string =
-      clientDoc?.documentId ?? clientDoc?.id ?? '';
-
-    const filesRaw: any[] = Array.isArray(clientDoc?.document)
-      ? clientDoc.document
+  // Some setups keep a single media in `document`, others allow multiple.
+  const docsArray = Array.isArray(cd.document)
+    ? cd.document
+    : cd.document
+      ? [cd.document]
       : [];
 
-    const files: MinimalFile[] = filesRaw
-      .filter(Boolean)
-      .map((f) => {
-        const id = String(f?.documentId ?? f?.id ?? '');
-        const url = String(f?.url ?? '');
-        const name = String(f?.name ?? '');
-        const mime = String(f?.mime ?? '');
-        const size = Number.isFinite(f?.size) ? Number(f.size) : 0;
+  const files: MinimalFile[] = docsArray.map((f: any) => ({
+    // DO NOT swap/overwrite these:
+    id: Number(f?.id),                       // numeric Upload id
+    documentId: String(f?.documentId ?? ''), // stable string id
+    url: String(f?.url ?? ''),
+    name: String(f?.name ?? ''),
+    mime: String(f?.mime ?? ''),
+    size: Number(f?.size ?? 0),
+    thumbnailUrl: f?.formats?.thumbnail?.url ?? null,
+  }));
 
-        // Optional thumbnail (if images with formats)
-        const thumbUrl = f?.formats?.thumbnail?.url
-          ? String(f.formats.thumbnail.url)
-          : undefined;
-
-        return { id, url, name, mime, size, ...(thumbUrl ? { thumbUrl } : {}) };
-      });
-
-    return { clientDocumentId, files };
-  },
+  return {
+    clientDocumentId: String(cd?.documentId ?? cd?.id ?? ''), // prefer documentId if present
+    files,
+  };
+},
 
 
 
