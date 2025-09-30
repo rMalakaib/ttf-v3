@@ -178,13 +178,13 @@ export async function recomputeSubmissionScore(
 
   const sub = await strapi.documents('api::submission.submission').findOne({
     documentId: submissionDocumentId,
-    fields: ['score', 'number'] as any,
+    fields: ['submissionScore', 'number'] as any,
     populate: { filing: { fields: ['documentId'] as any } } as any,
   } as any);
 
   const filingId = sub?.filing?.documentId as string | undefined;
 
-  const before = Number(sub?.score ?? 0);
+  const before = Number(sub?.SubmissionScore ?? 0);
   if (before === rounded) {
     if (log) console.log('[scoring] submission no-op (unchanged)', { submissionDocumentId, rounded });
     return rounded;
@@ -192,7 +192,7 @@ export async function recomputeSubmissionScore(
 
   await strapi.documents('api::submission.submission').update({
     documentId: submissionDocumentId,
-    data: { score: rounded },
+    data: { SubmissionScore: rounded },
     status: 'published',
   } as any);
 

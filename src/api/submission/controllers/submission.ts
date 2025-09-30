@@ -9,18 +9,18 @@ export default factories.createCoreController('api::submission.submission', ({ s
     const sub = await strapi.documents('api::submission.submission').findFirst({
       publicationState: 'preview',
       filters: { filing: { documentId } },
-      fields: ['documentId', 'number', 'score', 'submittedAt'] as any,
+      fields: ['documentId', 'number', 'submissionScore', 'submittedAt'] as any,
       sort: ['number:desc', 'submittedAt:desc'],
     } as any);
 
     if (!sub) return ctx.notFound('No submissions found for this filing');
 
-    const scoreNum = sub.score == null ? 0 : Number(sub.score);
+    const scoreNum = sub.submissionScore == null ? 0 : Number(sub.submissionScore);
     ctx.body = {
       filingDocumentId: documentId,
       submissionDocumentId: sub.documentId,
       submissionNumber: sub.number,
-      score: Number.isFinite(scoreNum) ? scoreNum : 0,
+      subsmissionScore: Number.isFinite(scoreNum) ? scoreNum : 0,
       submittedAt: sub.submittedAt ?? null,
     };
   },

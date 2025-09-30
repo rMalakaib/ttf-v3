@@ -4,7 +4,7 @@ export default {
   routes: [
     {
       method: 'GET',
-      path: '/framework-versions/:id/toc',
+      path: '/framework-versions/:filingId/toc',
       handler: 'framework-version.listToc',
       config: {
         policies: [],

@@ -978,11 +978,11 @@ export interface ApiSubmissionSubmission extends Struct.CollectionTypeSchema {
         number
       >;
     publishedAt: Schema.Attribute.DateTime;
-    score: Schema.Attribute.Decimal;
     submission_answers: Schema.Attribute.Relation<
       'oneToMany',
       'api::submission-answer.submission-answer'
     >;
+    submissionScore: Schema.Attribute.Decimal;
     submittedAt: Schema.Attribute.DateTime & Schema.Attribute.Required;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &

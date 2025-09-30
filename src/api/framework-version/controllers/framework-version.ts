@@ -145,28 +145,46 @@ export default factories.createCoreController('api::framework-version.framework-
     return this.transformResponse(withScore);
   },
   /**
-   * GET /framework-versions/:id/toc
-   * Returns a lean "table of contents" for a framework version.
-   * Includes only the header and order fields.
-   * Sorted by order:desc.
-   * Usage: call when rendering a TOC sidebar or index.
+   * GET /filings/:filingId/toc
+   * Returns a lean TOC for the framework version related to a filing.
+   * Fields: header, order; sorted by order:asc.
    */
-
   async listToc(ctx) {
-  const { id: versionDocumentId } = ctx.params;
+    const { filingId } = ctx.params;
 
-  const entities = await strapi
-    .documents('api::question.question')
-    .findMany({
-      filters: { framework_version: { documentId: versionDocumentId } },
-      fields: ['header', 'order'],     // TOC needs only these
-      sort: ['order:asc'],            // DESC as requested
-      populate: [],
-      pagination: { pageSize: 500 },   // or adjust to your max
-    });
+    // 1) Load the filing (by documentId) and populate the relation to get framework_version.documentId
+    const filing = await strapi
+      .documents('api::filing.filing')
+      .findFirst({
+        filters: { documentId: filingId },
+        populate: {
+          framework_version: { fields: ['id'] },
+        },
+        fields: ['id'], // only what we need
+      });
 
-  const sanitized = await this.sanitizeOutput(entities, ctx);
-  return this.transformResponse(sanitized);
+    if (!filing) {
+      ctx.throw(404, `Filing with documentId "${filingId}" not found`);
+    }
+
+    const frameworkVersionDocId = filing.framework_version?.documentId;
+    if (!frameworkVersionDocId) {
+      ctx.throw(400, `Filing "${filingId}" is not linked to a framework_version`);
+    }
+
+    // 2) Fetch questions for that framework version (TOC)
+    const entities = await strapi
+      .documents('api::question.question')
+      .findMany({
+        filters: { framework_version: { documentId: frameworkVersionDocId } },
+        fields: ['header', 'order'],
+        sort: ['order:asc'],
+        populate: [],
+        pagination: { pageSize: 500 },
+      });
+
+    const sanitized = await this.sanitizeOutput(entities, ctx);
+    return this.transformResponse(sanitized);
   },
 
     async listFinalScores(ctx) {

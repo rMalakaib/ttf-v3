@@ -1,6 +1,22 @@
 // path: src/api/filing/controllers/filing.ts
 import { factories } from '@strapi/strapi';
 
+const FIRST_QUESTION_FIELDS = [
+  'documentId',
+  'order',
+  'header',
+  'subheader',
+  'prompt',
+  'guidanceMarkdown',
+  'questionType',
+  'example',
+  'maxScore',
+  'modelPrompt',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+
 export default factories.createCoreController('api::filing.filing', ({ strapi }) => ({
   async listByProject(ctx) {
     const { projectId } = ctx.params;
@@ -326,4 +342,86 @@ export default factories.createCoreController('api::filing.filing', ({ strapi })
     const sanitized = await this.sanitizeOutput(updated, ctx);
     return this.transformResponse(sanitized);
   },
+
+   /**
+   * GET /filings/:id/first-question
+   * Returns the lowest-ordered Question for the Filing's Framework Version.
+   * ':id' is the Filing documentId in Strapi v5.
+   * Optional: override fields via ?fields[0]=order&fields[1]=header...
+   */
+  async findFirstQuestion(ctx) {
+    const filingDocumentId = ctx.params.id;
+    const q = ctx.query as any;
+
+    // delegate to service
+    const fields = q?.fields ?? [...FIRST_QUESTION_FIELDS];
+
+    const result = await strapi
+      .service('api::filing.filing')
+      .getFirstQuestionForFiling({
+        filingDocumentId,
+        fields,
+      });
+
+    if (!result) return ctx.notFound('First question not found for filing');
+
+    // sanitize and transform
+    const sanitized = await this.sanitizeOutput(result, ctx);
+    return this.transformResponse(sanitized);
+  },
+
+    /**
+   * GET /filings/:id/client-document/files
+   * Minimal shape for files: { id, url, name, mime, size, thumbUrl? }
+   */
+  async findClientDocumentFiles(ctx) {
+    const filingDocumentId = String(ctx.params?.id ?? '');
+    if (!filingDocumentId) return ctx.badRequest('Missing filing documentId');
+
+    // Get files (already filtered to minimal fields by the service)
+    const result = await strapi
+      .service('api::filing.filing')
+      .getClientDocumentFilesMinimal({ filingDocumentId });
+
+    if (!result) return ctx.notFound('No client document found for this filing');
+
+    // Helper to produce absolute URLs when your upload config returns relative URLs
+    const baseUrl = strapi.config.get('server.url') || '';
+    const toAbs = (u?: string | null) =>
+      u && u.startsWith('http') ? u : (u ? `${baseUrl}${u}` : '');
+
+    const files = result.files.map((f) => ({
+      id: f.id,
+      url: toAbs(f.url),
+      name: f.name,
+      mime: f.mime,
+      size: f.size,
+      ...(f.thumbUrl ? { thumbUrl: toAbs(f.thumbUrl) } : {}),
+    }));
+
+    // Consistent DTO
+    const payload = {
+      filingId: filingDocumentId,
+      clientDocumentId: result.clientDocumentId,
+      files,
+    };
+
+    return this.transformResponse(payload);
+  },
+
+    /**
+   * GET /api/filings/:id/score-summary?status=draft|final|v1_submitted|...
+   */
+  async scoreSummary(ctx) {
+    const { id: filingDocumentId } = ctx.params;
+    const status = typeof ctx.query?.status === 'string' ? ctx.query.status : undefined;
+
+    const result = await strapi
+      .service('api::filing.filing')
+      .computeScoreSummary({ filingDocumentId, status });
+
+    const sanitized = await this.sanitizeOutput(result, ctx);
+    return this.transformResponse(sanitized);
+  },
+
 }));

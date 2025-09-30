@@ -22,6 +22,26 @@ import {
   type Action,
 } from '../utils/roles';
 
+
+type GetClientFilesArgs = {
+  filingDocumentId: string;
+};
+
+/**
+ * Minimal Upload file shape used by the frontend
+ */
+type MinimalFile = {
+  id: string;
+  url: string;
+  name: string;
+  mime: string;
+  size: number;
+  thumbUrl?: string;
+};
+
+
+
+
 const INITIAL_STATUS = 'draft' as const;
 
 /* =================================================================== */
@@ -256,7 +276,68 @@ async function recomputeCurrentScoreTx(
 }
 
 
+function toNum(v: unknown): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
 
+// Parse vN_submitted -> N, otherwise null (draft/final/unknown)
+function submissionNumberFromStatus(status?: string | null): number | null {
+  if (!status) return null;
+  const s = String(status).toLowerCase();
+  if (s === 'draft' || s === 'final') return null;
+  const m = /^v(\d+)_submitted$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Mirrors the submission controller logic, with an optional round filter.
+ * - If `roundNumber` is provided, fetch that exact submission number.
+ * - Otherwise, return the latest by number desc, submittedAt desc.
+ * Returns 0 if none found (keeps summary endpoint simple).
+ */
+async function getSubmissionScore(
+  strapi: any,
+  filingDocumentId: string,
+  roundNumber?: number | null
+): Promise<number> {
+  const base: any = {
+    publicationState: 'preview',
+    filters: { filing: { documentId: filingDocumentId } },
+    fields: ['documentId', 'number', 'submissionScore', 'submittedAt'] as any,
+    populate: [],
+  };
+
+  let sub: any | null = null;
+
+  if (Number.isFinite(roundNumber as number)) {
+    // Specific round (e.g., v3_submitted => number = 3)
+    const rows = await strapi.documents('api::submission.submission').findMany({
+      ...base,
+      filters: { ...base.filters, number: Number(roundNumber) },
+      sort: ['submittedAt:desc'], // if multiple for same number, pick most recent
+      pagination: { pageSize: 1 },
+    } as any);
+    sub = Array.isArray(rows) ? rows[0] : null;
+  } else {
+    // Latest overall (final or unspecified)
+    sub = await strapi.documents('api::submission.submission').findFirst({
+      ...base,
+      sort: ['number:desc', 'submittedAt:desc'],
+    } as any);
+  }
+
+  if (!sub) return 0;
+
+  const scoreNum = sub.submissionScore == null ? 0 : Number(sub.submissionScore);
+  return Number.isFinite(scoreNum) ? scoreNum : 0;
+}
 
 /* =================================================================== */
 /* Service                                                              */
@@ -729,5 +810,189 @@ export default factories.createCoreService('api::filing.filing', ({ strapi }) =>
     };
   },
   
+  /**
+   * Resolve Filing -> Framework Version -> lowest-ordered Question.
+   */
+   async getFirstQuestionForFiling({
+    filingDocumentId,
+    fields,
+  }: {
+    filingDocumentId: string;
+    fields?: readonly string[];
+  }) {
+    // ✅ Use service().findOne(id, params)
+    const filing = await strapi.service('api::filing.filing').findOne(filingDocumentId, {
+      publicationState: 'preview' as any,
+      fields: ['documentId'] as any,
+      populate: {
+        framework_version: { fields: ['documentId'] as any },
+      } as any,
+    } as any);
 
+    if (!filing) return null;
+
+    // ✅ Cast to any (or define a type) to access populated relation
+    const frameworkVersionId = (filing as any)?.framework_version?.documentId;
+    if (!frameworkVersionId) return null;
+
+    // Fetch the lowest-ordered question for that framework version
+    const rows = await strapi.documents('api::question.question').findMany({
+      publicationState: 'preview',
+      filters: { framework_version: { documentId: frameworkVersionId } },
+      fields: (fields ?? [
+        'documentId',
+        'order',
+        'header',
+        'subheader',
+        'prompt',
+        'guidanceMarkdown',
+        'questionType',
+        'example',
+        'maxScore',
+        'modelPrompt',
+        'createdAt',
+        'updatedAt',
+      ]) as any,
+      sort: ['order:asc', 'createdAt:asc'],
+      populate: [],
+      pagination: { pageSize: 1 },
+    } as any);
+
+    return Array.isArray(rows) && rows[0] ? rows[0] : null;
+  },
+
+
+   /**
+   * Returns minimal files (id, url, name, mime, size, thumbUrl?) for the client-document
+   * linked to a given filing documentId.
+   *
+   * null if no client-document exists for the filing.
+   */
+  async getClientDocumentFilesMinimal(
+    args: GetClientFilesArgs
+  ): Promise<{ clientDocumentId: string; files: MinimalFile[] } | null> {
+    const { filingDocumentId } = args;
+
+    // Find the client-document for this filing; populate the 'document' media
+    const clientDocs = await (strapi.documents as any)(
+      'api::client-document.client-document'
+    ).findMany({
+      filters: { filing: { documentId: filingDocumentId } },
+      page: 1,
+      pageSize: 1,
+      populate: {
+        document: {
+          fields: [
+            'id',
+            'documentId',
+            'url',
+            'name',
+            'mime',
+            'size',
+            'formats', // for thumbnail (if image)
+          ],
+        },
+      },
+    }) as any[];
+
+    if (!clientDocs?.length) return null;
+
+    const clientDoc = clientDocs[0];
+    const clientDocumentId: string =
+      clientDoc?.documentId ?? clientDoc?.id ?? '';
+
+    const filesRaw: any[] = Array.isArray(clientDoc?.document)
+      ? clientDoc.document
+      : [];
+
+    const files: MinimalFile[] = filesRaw
+      .filter(Boolean)
+      .map((f) => {
+        const id = String(f?.documentId ?? f?.id ?? '');
+        const url = String(f?.url ?? '');
+        const name = String(f?.name ?? '');
+        const mime = String(f?.mime ?? '');
+        const size = Number.isFinite(f?.size) ? Number(f.size) : 0;
+
+        // Optional thumbnail (if images with formats)
+        const thumbUrl = f?.formats?.thumbnail?.url
+          ? String(f.formats.thumbnail.url)
+          : undefined;
+
+        return { id, url, name, mime, size, ...(thumbUrl ? { thumbUrl } : {}) };
+      });
+
+    return { clientDocumentId, files };
+  },
+
+
+
+
+   /**
+ * Compute { currentScore, submissionScore, maxScore } for a filing.
+ * - maxScore = framework_version.totalScore
+ * - submissionScore depends on ?status:
+ *   - draft => 0
+ *   - final => latest submission
+ *   - vN_submitted => submission for round N
+ * - currentScore override:
+ *   - if status === 'final' => use filing.finalScore (fallback to filing.currentScore)
+ */
+async computeScoreSummary(opts: {
+  filingDocumentId: string;
+  status?: string;
+}): Promise<{
+  filingDocumentId: string;
+  currentScore: number;
+  submissionScore: number;
+  maxScore: number;
+}> {
+  const { filingDocumentId, status } = opts;
+
+  // 1) Load filing (need currentScore, finalScore, framework_version.totalScore)
+  const filing = await strapi.service('api::filing.filing').findOne(filingDocumentId, {
+    publicationState: 'preview' as any,
+    fields: ['documentId', 'currentScore', 'finalScore'] as any, // ← include finalScore
+    populate: {
+      framework_version: { fields: ['documentId', 'totalScore'] as any },
+    } as any,
+  } as any);
+
+  if (!filing) {
+    throw new Error(`Filing not found: ${filingDocumentId}`);
+  }
+
+  const s = status ? String(status).toLowerCase() : undefined;
+
+  // Base scores from filing
+  const baseCurrent = toNum((filing as any).currentScore);
+  const baseFinal = toNum((filing as any).finalScore); // may be null/undefined
+  const maxScore = toNum((filing as any)?.framework_version?.totalScore);
+
+  // 2) Determine submissionScore by status
+  let submissionScore = 0;
+  if (s === 'draft') {
+    submissionScore = 0;
+  } else if (s === 'final') {
+    // Latest submission when final
+    submissionScore = await getSubmissionScore(strapi, filingDocumentId, null);
+  } else {
+    // vN_submitted -> N, else latest
+    const round = submissionNumberFromStatus(s);
+    submissionScore = await getSubmissionScore(strapi, filingDocumentId, round);
+  }
+
+  // 3) currentScore override when status=final
+  const currentScore =
+    s === 'final'
+      ? (Number.isFinite(baseFinal) ? baseFinal : baseCurrent)
+      : baseCurrent;
+
+  return {
+    filingDocumentId,
+    currentScore,
+    submissionScore,
+    maxScore,
+  };
+},
 }));

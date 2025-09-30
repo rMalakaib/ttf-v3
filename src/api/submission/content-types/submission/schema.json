@@ -41,7 +41,7 @@
       "target": "api::submission-answer.submission-answer",
       "mappedBy": "submission"
     },
-    "score": {
+    "submissionScore": {
       "type": "decimal"
     }
   }
