@@ -168,7 +168,53 @@ export default factories.createCoreController(
 
       // 4) Return the normal response
       return res;
-    }
+    },
+
+    // GET /filings/:filingId/questions/:questionId/lean-with-draft/from/:order?take=3
+async leanWithDraftFromOrder(ctx) {
+  const filingDocumentId   = String(ctx.params?.filingId || '').trim();
+  const questionDocumentId = String(ctx.params?.questionId || '').trim();
+  const fromOrderRaw       = (ctx.params?.order ?? '').toString();
+  const fromOrder          = Number(fromOrderRaw);
+
+  if (!filingDocumentId || !questionDocumentId) {
+    ctx.throw(400, 'filingId and questionId are required path params');
+  }
+  if (!Number.isFinite(fromOrder)) {
+    ctx.throw(400, 'order must be a valid number');
+  }
+
+  const take = Math.max(1, Math.min(20, Number((ctx.query as any)?.take ?? 3)));
+
+  // Fixed whitelist of lean question fields
+  const questionFields = [
+    'id',
+    'documentId',
+    'header',
+    'subheader',
+    'prompt',
+    'example',
+    'guidanceMarkdown',
+    'maxScore',
+    'questionType',
+    'order', // used internally for sort/verification (not required in output if you don’t want it)
+  ];
+
+  const rows = await strapi
+    .service('api::answer-revision.answer-revision')
+    .getLeanWithDraftFromOrder({
+      filingDocumentId,
+      questionDocumentId,
+      fromOrder,
+      take,
+      questionFields,
+      userId: ctx.state?.user?.id ?? null,
+    });
+
+  // Rows are already shape-limited; just pass through the standard transformer for consistency.
+  return this.transformResponse(rows);
+}
+
 
 
   })

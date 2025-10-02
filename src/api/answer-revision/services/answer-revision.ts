@@ -97,7 +97,16 @@ export default factories.createCoreService('api::answer-revision.answer-revision
             question: { documentId: questionDocumentId },
             isDraft:  true,
             },
-            fields: ['documentId','answerText','modelScore','auditorScore','updatedAt'] as any,
+            fields: ['documentId',
+          'answerText',
+          'modelScore',
+          'modelReason',
+          'modelSuggestion',
+          'auditorScore',
+          'auditorReason',
+          'auditorSuggestion',
+          'updatedAt',
+            ] as any,
             populate: [],
             sort: ['updatedAt:desc'],
             pagination: { pageSize: 10 },
@@ -588,6 +597,94 @@ export default factories.createCoreService('api::answer-revision.answer-revision
       };
     },
 
+    /**
+ * PUBLIC — Return lean Question list (from 'fromOrder', inclusive) for the Filing's framework,
+ * plus the DRAFT AnswerRevision for each Question (lazily created if missing).
+ */
+async getLeanWithDraftFromOrder(opts: {
+  filingDocumentId: string;
+  questionDocumentId: string;
+  fromOrder: number;
+  take: number;
+  questionFields: string[];
+  userId?: number | null;
+}) {
+  const {
+    filingDocumentId,
+    questionDocumentId,
+    fromOrder,
+    take,
+    questionFields,
+    userId,
+  } = opts;
+
+  // Ensure (filing, question) belong to the same framework_version
+  const { filing, question } = await this.assertCoherence(filingDocumentId, questionDocumentId);
+
+  // Resolve the framework_version.documentId from the Filing (authoritative)
+  const filingFull = await strapi.documents('api::filing.filing').findFirst({
+    publicationState: 'preview',
+    filters: { documentId: filingDocumentId },
+    populate: ['framework_version'],
+    fields: ['id', 'documentId'],
+  } as any);
+
+  const frameworkDocId = (filingFull as any)?.framework_version?.documentId;
+  if (!frameworkDocId) {
+    throw new Error('Unable to resolve framework version for filing');
+  }
+
+  // Fetch Questions in the same framework, from order (inclusive), limited by 'take'
+const questions = await strapi.documents('api::question.question').findMany({
+  publicationState: 'preview',
+  filters: {
+    framework_version: { documentId: frameworkDocId },
+    order: { $gte: fromOrder }, // inclusive "from"
+  },
+  fields: questionFields,
+  sort: ['order:asc'],
+  populate: [],
+  // ⬇️ CHANGE: use top-level limit (or page/pageSize)
+  limit: take,          // preferred
+  // page: 1,           // alternative
+  // pageSize: take,    // alternative
+} as any);
+
+// Optional belt-and-suspenders
+const limited = (questions ?? []).slice(0, take);
+const rows = await Promise.all(
+  limited.map(async (q: any) => {
+    const draft = await this.getOrCreateDraft({
+      filingDocumentId,
+      questionDocumentId: q.documentId,
+      userId: userId ?? undefined,
+    });
+
+    return {
+      id:               q?.id ?? null,
+      documentId:       q?.documentId ?? null,
+      header:           q?.header ?? null,
+      subheader:        q?.subheader ?? null,
+      prompt:           q?.prompt ?? null,
+      example:          q?.example ?? null,
+      guidanceMarkdown: q?.guidanceMarkdown ?? null,
+      maxScore:         q?.maxScore ?? null,
+      questionType:     q?.questionType ?? null,
+      draft: {
+        answerText:        draft?.answerText ?? null,
+        auditorScore:      draft?.auditorScore ?? null,
+        auditorReason:     draft?.auditorReason ?? null,
+        auditorSuggestion: draft?.auditorSuggestion ?? null,
+        modelScore:        draft?.modelScore ?? null,
+        modelReason:       draft?.modelReason ?? null,
+        modelSuggestion:   draft?.modelSuggestion ?? null,
+      },
+    };
+  })
+);
+
+return rows;
+},
 
 
 }));

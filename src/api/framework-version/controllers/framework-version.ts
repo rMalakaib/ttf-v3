@@ -139,7 +139,7 @@ export default factories.createCoreController('api::framework-version.framework-
 
     const sanitized = await this.sanitizeOutput(entities, ctx);
     const withScore = Array.isArray(sanitized)
-      ? sanitized.map(({ maxScore, ...rest }) => ({ ...rest, score: maxScore }))
+      ? sanitized.map(({ maxScore, ...rest }) => ({ ...rest, maxScore: maxScore }))
       : sanitized;
 
     return this.transformResponse(withScore);

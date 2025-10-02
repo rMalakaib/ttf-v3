@@ -35,6 +35,18 @@ export default {
         middlewares: [],
       },
     },
+      {
+    method: 'GET',
+    path: '/filings/:filingId/questions/:questionId/lean-with-draft/from/:order',
+    handler: 'answer-revision.leanWithDraftFromOrder',
+    config: {
+      policies: [
+        { name: 'global::enforce-project-membership', config: { target: 'answer-revision' } }
+      ],
+      middlewares: [],
+    },
+  },
+
   ],
 };
  
