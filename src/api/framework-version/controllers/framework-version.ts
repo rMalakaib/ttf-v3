@@ -187,21 +187,46 @@ export default factories.createCoreController('api::framework-version.framework-
     return this.transformResponse(sanitized);
   },
 
-    async listFinalScores(ctx) {
-    const frameworkVersionId = String(ctx.params?.frameworkVersionId || '').trim();
-    if (!frameworkVersionId) ctx.throw(400, 'frameworkVersionId is required');
+     async listFinalScores(ctx) {
+    const frameworkVersionIdParam = String(ctx.params?.frameworkVersionId || '').trim();
+    const filingIdParam = String(ctx.params?.filingId || '').trim();
 
     // Optional finalizedAt range: ?start=YYYY-MM-DD&end=YYYY-MM-DD (inclusive)
     const start = ctx.query?.start ? String(ctx.query.start) : null;
     const end   = ctx.query?.end   ? String(ctx.query.end)   : null;
 
+    let frameworkVersionId = frameworkVersionIdParam;
+
+    // If no frameworkVersionId was provided, try resolving from filingId
+    if (!frameworkVersionId && filingIdParam) {
+      const filing = (await strapi.documents('api::filing.filing').findOne({
+      documentId: filingIdParam,
+      publicationState: 'preview',
+      fields: ['documentId'] as any,
+      populate: {
+        framework_version: { fields: ['documentId'] as any },
+      } as any,
+    } as any)) as unknown as {
+      framework_version?: { documentId?: string };
+    } | null;
+
+    if (!filing) ctx.throw(404, 'filing not found');
+
+    const frameworkVersionId =
+      filing?.framework_version?.documentId ?? '';
+
+    if (!frameworkVersionId) ctx.throw(422, 'filing has no framework_version');
+
+    if (!frameworkVersionId) {
+      ctx.throw(400, 'frameworkVersionId or filingId is required');
+    }
+
     const results = await strapi
       .service('api::framework-version.framework-version')
       .listFinalScores({ frameworkVersionId, start, end });
 
-    // Plain JSON payload
-    ctx.body = { data: results, meta: { count: results.length } };
-  },
+    ctx.body = { data: results, meta: { count: results.length, frameworkVersionId } };
+  }},
 
   async listFilingsWithScores(ctx) {
     const frameworkVersionId = String(ctx.params?.frameworkVersionId || '').trim();

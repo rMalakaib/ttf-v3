@@ -17,18 +17,49 @@ export default factories.createCoreService('api::framework-version.framework-ver
    */
   async listFinalScores({
     frameworkVersionId,
+    filingId,
     start,
     end,
   }: {
-    frameworkVersionId: string;
+    frameworkVersionId?: string;
+    filingId?: string;
     start?: string | null;
     end?: string | null;
   }) {
+    // Use a local so we don't reassign the parameter (avoids no-param-reassign)
+    let resolvedFrameworkVersionId = frameworkVersionId?.trim();
+
+    // Resolve frameworkVersionId from filingId if needed
+    if (!resolvedFrameworkVersionId) {
+      if (!filingId) {
+        throw new Error('frameworkVersionId or filingId is required');
+      }
+
+      // Minimal shape for the piece we need
+      type FilingWithFV = {
+        framework_version?: { documentId?: string };
+      } | null;
+
+      const filing = (await strapi.documents('api::filing.filing').findOne({
+        documentId: filingId,
+        publicationState: 'preview',
+        fields: ['documentId'] as any,
+        populate: {
+          framework_version: { fields: ['documentId'] as any },
+        } as any,
+      } as any)) as unknown as FilingWithFV;
+
+      if (!filing) throw new Error('filing not found');
+
+      resolvedFrameworkVersionId = filing?.framework_version?.documentId?.trim();
+      if (!resolvedFrameworkVersionId) throw new Error('filing has no framework_version');
+    }
+
     const startISO = toISO(start ?? null, false);
     const endISO   = toISO(end ?? null, true);
 
     const filters: any = {
-      framework_version: { documentId: frameworkVersionId },
+      framework_version: { documentId: resolvedFrameworkVersionId },
     };
     if (startISO || endISO) {
       filters.finalizedAt = {
@@ -37,8 +68,7 @@ export default factories.createCoreService('api::framework-version.framework-ver
       };
     }
 
-    // Pull candidate filings; filter out null finalScore in JS to avoid operator differences.
-    const rows = await strapi.documents('api::filing.filing').findMany({
+    const rows = (await strapi.documents('api::filing.filing').findMany({
       publicationState: 'preview',
       filters,
       fields: ['documentId', 'finalScore', 'finalizedAt'] as any,
@@ -47,14 +77,14 @@ export default factories.createCoreService('api::framework-version.framework-ver
       } as any,
       sort: ['finalizedAt:desc', 'updatedAt:desc'],
       pagination: { pageSize: 5000 },
-    } as any);
+    } as any)) as any[];
 
-    const out = (rows as any[])
-      .filter(r => r?.finalScore != null) // exclude where no finalScore
+    const out = rows
+      .filter(r => r?.finalScore != null)
       .map(r => ({
         filingId: r.documentId,
         projectId: r?.project?.documentId ?? null,
-        projectName: r?.project?.domain ?? r?.project?.slug ?? null, // using domain as "name" proxy
+        projectName: r?.project?.domain ?? r?.project?.slug ?? null,
         finalScore: Number(r.finalScore),
         finalizedAt: r.finalizedAt ?? null,
       }));

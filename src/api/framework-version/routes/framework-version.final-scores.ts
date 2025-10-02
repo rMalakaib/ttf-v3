@@ -9,5 +9,14 @@ export default {
         middlewares: [],
       },
     },
+    {
+      method: 'GET',
+      path: '/filings/:filingId/final-scores',
+      handler: 'framework-version.listFinalScores',
+      config: {
+        policies: [],
+        middlewares: [],
+      },
+    },
   ],
 };
