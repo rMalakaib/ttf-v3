@@ -199,7 +199,7 @@ export default factories.createCoreService('api::submission.submission', ({ stra
     let submission = await strapi.documents('api::submission.submission').findFirst({
       publicationState: 'preview',
       filters: { filing: { documentId: filingDocumentId }, number },
-      fields: ['documentId', 'number', 'score'] as any,
+      fields: ['documentId', 'number', 'submissionScore'] as any,
       populate: [],
     } as any);
 
